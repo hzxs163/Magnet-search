@@ -23,6 +23,7 @@ const X1337X_UA = {
 
 let CCTV10_DEBUG = {};
 let CILIMAO_DEBUG = {};
+let X1337X_DEBUG = {};
 
 export async function onRequest(context) {
   const { request, waitUntil } = context;
@@ -40,6 +41,7 @@ export async function onRequest(context) {
 
   CCTV10_DEBUG = {};
   CILIMAO_DEBUG = {};
+  X1337X_DEBUG = {};
 
   const startTime = Date.now();
 
@@ -121,13 +123,14 @@ export async function onRequest(context) {
         totalBeforeDedup: allItems.length,
         cctv10Raw: CCTV10_DEBUG,
         cilimaoRaw: CILIMAO_DEBUG,
+        x1337xRaw: X1337X_DEBUG,
         ...debug,
       },
     });
 
   } catch (err) {
     console.error('Search error:', err);
-    return jsonResponse({ error: 'Search failed', detail: String(err), cctv10Raw: CCTV10_DEBUG, cilimaoRaw: CILIMAO_DEBUG }, 502);
+    return jsonResponse({ error: 'Search failed', detail: String(err), cctv10Raw: CCTV10_DEBUG, cilimaoRaw: CILIMAO_DEBUG, x1337xRaw: X1337X_DEBUG }, 502);
   }
 }
 
@@ -793,7 +796,7 @@ async function batchFetchCilimaoDetails(links, concurrency, domain, waitUntil) {
 // 注意：正常 1337x 页面也引用 challenge-platform 脚本，判定只认验证页特有字样，不能误伤真页
 function fetchX1337x(url) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 10000);
+  const timer = setTimeout(() => ctrl.abort(), 6000);
   return fetch(url, { headers: X1337X_UA, signal: ctrl.signal })
     .then(async (resp) => {
       clearTimeout(timer);
@@ -866,6 +869,7 @@ async function fetchFromX1337x(query, page, sort, waitUntil) {
         await attachX1337xMagnets(domain, items.slice(0, 15), waitUntil);
         const hits = items.filter((it) => it.magnet);
         if (hits.length) {
+          X1337X_DEBUG = { tried: domains, failures: [...failures, `${domain}=成功(${hits.length}条)`], status: 'ok' };
           return hits.map((it) => ({
             name: it.name,
             size: it.size,
@@ -885,6 +889,7 @@ async function fetchFromX1337x(query, page, sort, waitUntil) {
       }
     }
   }
+  X1337X_DEBUG = { tried: domains, failures, status: 'empty' };
   if (failures.length) console.error('1337x failures:', failures.join(' | '));
   return [];
 }
