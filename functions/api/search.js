@@ -797,7 +797,17 @@ async function batchFetchCilimaoDetails(links, concurrency, domain, waitUntil) {
 function fetchX1337x(url) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 6000);
-  return fetch(url, { headers: X1337X_UA, signal: ctrl.signal })
+  // 补全浏览器特征头（Referer/Sec-Fetch 等）：万一 WAF 是按请求特征拦的（而非 IP 段），
+  // 完整浏览器头可能绕过；若仍 403 则确认是 IP 级屏蔽
+  const headers = {
+    ...X1337X_UA,
+    'Referer': `${new URL(url).origin}/`,
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'same-origin',
+    'Upgrade-Insecure-Requests': '1',
+  };
+  return fetch(url, { headers, signal: ctrl.signal })
     .then(async (resp) => {
       clearTimeout(timer);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
