@@ -8,6 +8,7 @@
 5. U3C3（cctv10）：从永久入口 cctv10.cc 提取当前落地域名
 6. 磁力猫（cilimao）：从永久入口 clm.cc / clm.la / cilimao.biz 解码 JS 跳转拿落地域名
 7. 磁力搜（ciliso）：CONFIG 写死，用磁力百科同款算法生成子域名
+8. 1337x：探测可直连镜像（带 CF 人机验证的自动跳过，命中即可用入口）
 把生成的域名写入 domains.json，验证交给 Workers 运行时做
 
 依赖：curl_cffi（用于模拟 Chrome TLS 指纹，绕过 WAF 403）
@@ -61,6 +62,17 @@ CILIMAO_ENTRY_URLS = [
     'https://clm.cc',
     'https://clm.la',
     'https://cilimao.biz',
+]
+
+# ========== 1337x 候选镜像（自动探测不带 CF 人机验证的可用入口） ==========
+X1337X_CANDIDATES = [
+    'https://1337x.la',
+    'https://1337x.st',
+    'https://www.1337x.tw',
+    'https://www.1337xx.to',
+    'https://1337xto.to',
+    'https://x1337x.eu',
+    'https://1337x.pro',
 ]
 
 # ========== 磁力搜（cls，写死 CONFIG） ==========
@@ -478,6 +490,32 @@ def get_ciliso_domains():
     return build_cilibaike_domains(CILISO_CONFIG)
 
 
+def extract_x1337x_domains():
+    """1337x：探测可直连镜像。用必定有结果的关键词 avengers 探测，
+    能出真实列表（含 /torrent/ 链接）才算可用；CF 验证页/无结果跳过。"""
+    ok = []
+    for domain in X1337X_CANDIDATES:
+        for attempt in range(2):
+            try:
+                url = f'{domain}/search/avengers/1/'
+                html = fetch_text(url, timeout=10)
+                if re.search(r'/torrent/\d+', html):
+                    ok.append(domain)
+                    print(f'[1337x] {domain} 可用')
+                    return ok
+                if re.search(r'<title>\s*(just a moment|attention required|请稍候)', html, re.I):
+                    raise RuntimeError('CF验证页')
+                print(f'[1337x] {domain} 无结果，跳过')
+                break
+            except Exception as e:
+                if attempt == 0:
+                    print(f'[1337x] {domain} {e}，2s 后重试')
+                    time.sleep(2)
+                    continue
+                print(f'[1337x] {domain} 失败: {e}')
+    return ok
+
+
 def load_previous_domains():
     if not OUTPUT_FILE.exists():
         return {}
@@ -503,6 +541,7 @@ def main():
         'cctv10': [],
         'cilimao': [],
         'ciliso': [],
+        'x1337x': [],
     }
 
     result['xiaocao'] = extract_xiaocao_domains()
@@ -546,6 +585,15 @@ def main():
 
     result['ciliso'] = get_ciliso_domains()
 
+    x1337x_domains = extract_x1337x_domains()
+    if x1337x_domains:
+        result['x1337x'] = x1337x_domains
+    else:
+        fallback = previous.get('x1337x', [])
+        if fallback:
+            print(f'[1337x] 提取为空，保留上次的 {len(fallback)} 个域名')
+        result['x1337x'] = fallback
+
     OUTPUT_FILE.write_text(
         json.dumps(result, ensure_ascii=False, indent=2),
         encoding='utf-8',
@@ -560,6 +608,7 @@ def main():
     print(f'  U3C3: {len(result["cctv10"])} 个')
     print(f'  磁力猫: {len(result["cilimao"])} 个')
     print(f'  磁力搜: {len(result["ciliso"])} 个')
+    print(f'  1337x: {len(result["x1337x"])} 个')
     if result['cctv10']:
         print('  U3C3 域名:')
         for d in result['cctv10']:
