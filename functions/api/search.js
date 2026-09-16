@@ -4,7 +4,7 @@ import domainsConfig from '../../domains.json';
 
 const JUNIORTER_API = 'https://torrent.juniorter.in/api/search-stream';
 const JUNIORTER_PROVIDERS = [
-  'yts', 'eztv', 'torrentclaw', 'piratebay', 'knaben', '1337x', 'limetorrents',
+  'yts', 'eztv', 'torrentclaw', 'piratebay', 'knaben', 'limetorrents',
   'torrentfunk', 'torrentdownloads', 'torlock', 'yourbittorrent', 'magnetz',
   'bitsearch', 'solidtorrents', 'torrentscsv', 'therarbg', 'animetosho', 'nyaa',
   'mikan', 'tokyotosho', 'dmhy', 'acgrip', 'subsplease', 'rutor',
@@ -13,17 +13,8 @@ const JUNIORTER_PROVIDERS = [
 
 const KNABEN_API = 'https://api.knaben.org/v1';
 
-// ========== 1337x（可直连镜像自动轮换） ==========
-const X1337X_CANDIDATES = ['https://1337x.la', 'https://1337x.st', 'https://www.1337x.tw', 'https://www.1337xx.to', 'https://1337xto.to'];
-const X1337X_UA = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'zh-CN,zh;q=0.9',
-};
-
 let CCTV10_DEBUG = {};
 let CILIMAO_DEBUG = {};
-let X1337X_DEBUG = {};
 
 export async function onRequest(context) {
   const { request, waitUntil } = context;
@@ -32,7 +23,7 @@ export async function onRequest(context) {
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
 
-  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,x1337x';
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
 
   if (!query) {
@@ -41,7 +32,6 @@ export async function onRequest(context) {
 
   CCTV10_DEBUG = {};
   CILIMAO_DEBUG = {};
-  X1337X_DEBUG = {};
 
   const startTime = Date.now();
 
@@ -78,8 +68,8 @@ export async function onRequest(context) {
     if (sources.includes('ciliso')) {
       tasks.push({ name: 'ciliso', promise: fetchFromCilibaike(query, page, sort, waitUntil, 'ciliso') });
     }
-    if (sources.includes('x1337x')) {
-      tasks.push({ name: 'x1337x', promise: fetchFromX1337x(query, page, sort, waitUntil) });
+    if (sources.includes('taocili')) {
+      tasks.push({ name: 'taocili', promise: fetchFromTaocili(query, page, sort, waitUntil) });
     }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
@@ -123,14 +113,13 @@ export async function onRequest(context) {
         totalBeforeDedup: allItems.length,
         cctv10Raw: CCTV10_DEBUG,
         cilimaoRaw: CILIMAO_DEBUG,
-        x1337xRaw: X1337X_DEBUG,
         ...debug,
       },
     });
 
   } catch (err) {
     console.error('Search error:', err);
-    return jsonResponse({ error: 'Search failed', detail: String(err), cctv10Raw: CCTV10_DEBUG, cilimaoRaw: CILIMAO_DEBUG, x1337xRaw: X1337X_DEBUG }, 502);
+    return jsonResponse({ error: 'Search failed', detail: String(err), cctv10Raw: CCTV10_DEBUG, cilimaoRaw: CILIMAO_DEBUG }, 502);
   }
 }
 
@@ -160,7 +149,7 @@ function getDomainsConfig() {
     cctv10: Array.isArray(data.cctv10) ? data.cctv10 : [],
     cilimao: Array.isArray(data.cilimao) ? data.cilimao : [],
     ciliso: Array.isArray(data.ciliso) ? data.ciliso : [],
-    x1337x: Array.isArray(data.x1337x) ? data.x1337x : [],
+    taocili: Array.isArray(data.taocili) ? data.taocili : [],
   };
 }
 
@@ -791,117 +780,73 @@ async function batchFetchCilimaoDetails(links, concurrency, domain, waitUntil) {
 }
 
 // ========== 工具函数 ==========
-// ========== 1337x ==========
-// 不走 fetchWithCache：偶发 CF 验证页绝不能进缓存（缓存会把“验证页”固化导致源一直 0 结果）
-// 注意：正常 1337x 页面也引用 challenge-platform 脚本，判定只认验证页特有字样，不能误伤真页
-function fetchX1337x(url) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 6000);
-  // 补全浏览器特征头（Referer/Sec-Fetch 等）：万一 WAF 是按请求特征拦的（而非 IP 段），
-  // 完整浏览器头可能绕过；若仍 403 则确认是 IP 级屏蔽
-  const headers = {
-    ...X1337X_UA,
-    'Referer': `${new URL(url).origin}/`,
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'same-origin',
-    'Upgrade-Insecure-Requests': '1',
-  };
-  return fetch(url, { headers, signal: ctrl.signal })
-    .then(async (resp) => {
-      clearTimeout(timer);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const text = await resp.text();
-      if (/<title>\s*(just a moment|attention required|请稍候)/i.test(text)) {
-        throw new Error('CF验证');
-      }
-      return text;
-    })
-    .catch((e) => {
-      clearTimeout(timer);
-      throw e;
-    });
+// ========== 淘磁力（内部 JSON API + 详情页补 magnet） ==========
+function b64FromUtf8(str) {
+  // Worker 安全：btoa 对 >U+00FF 字符会抛错，先转 UTF-8 字节再编码
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
 }
 
-function parseX1337xRows(html) {
-  const rows = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)].map((m) => m[1]).filter((r) => /torrent\/\d+/.test(r));
-  const items = [];
-  for (const row of rows) {
-    const link = [...row.matchAll(/<a[^>]*href="(\/torrent\/\d+\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/g)]
-      .find((m) => m[2].replace(/<[^>]+>/g, '').trim());
-    if (!link) continue;
-    const name = link[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
-    if (!name) continue;
-    items.push({
-      name,
-      detailPath: link[1],
-      size: ((row.match(/coll-4 size[^>]*>([^<]+)/) || [])[1] || '').trim(),
-      seeds: parseInt(((row.match(/coll-2 seeds[^>]*>([^<]+)/) || [])[1] || '0').replace(/[^\d]/g, '')) || 0,
-      peers: parseInt(((row.match(/coll-3 leeches[^>]*>([^<]+)/) || [])[1] || '0').replace(/[^\d]/g, '')) || 0,
-      date: ((row.match(/coll-date[^>]*>([^<]+)/) || [])[1] || '').trim(),
-    });
+async function fetchFromTaocili(query, page, sort, waitUntil) {
+  const config = getDomainsConfig();
+  const domains = config.taocili;
+  if (domains.length === 0) return [];
+
+  const keyword = encodeURIComponent(b64FromUtf8(query));
+  let sortParam = 'default';
+  if (sort === 'time' || sort === 'newest') sortParam = 'atime';
+  else if (sort === 'length') sortParam = 'size_desc';
+
+  const start = Math.max(0, (Math.max(1, page || 1) - 1) * 20);
+
+  for (const domain of domains) {
+    try {
+      // 站点前端实际翻页参数是 start(偏移)/count(条数)，不是 page
+      const apiUrl = `${domain}/apis/search?keyword=${keyword}&base64=1&detail=1&start=${start}&count=20&type=all&sort=${sortParam}`;
+      const text = await fetchWithCache(apiUrl, 1800, waitUntil);
+      let data;
+      try { data = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
+      if (!data || data.code !== 0 || !Array.isArray(data.items)) continue;
+      const rows = data.items.filter((it) => it && it.name && it._id).slice(0, 20);
+      if (rows.length === 0) continue;
+      const items = await batchFetchTaociliMagnets(rows, domain, waitUntil);
+      if (items.length > 0) return items;
+    } catch (err) {
+      console.error(`Taocili domain ${domain} failed:`, err);
+    }
   }
-  return items;
+  return [];
 }
 
 // 详情页并发抓 magnet（限量并发，单条失败跳过，不拖整体）
-async function attachX1337xMagnets(domain, rows, waitUntil) {
+async function batchFetchTaociliMagnets(rows, domain, waitUntil) {
   const CONCURRENCY = 6;
+  const results = [];
   let idx = 0;
   const worker = async () => {
     while (idx < rows.length) {
       const i = idx++;
       const row = rows[i];
       try {
-        const html = await fetchX1337x(`${domain}${row.detailPath}`);
-        const m = html.match(/magnet:\?xt=urn:btih:[a-zA-Z0-9]+[^"'\s]*/);
-        if (m) row.magnet = simplifyMagnet(m[0]);
+        const detailUrl = `${domain}/magnet/${row._id}`;
+        const html = await fetchWithCache(detailUrl, 3600, waitUntil);
+        const m = html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{40}/);
+        if (!m) continue;
+        results.push({
+          name: row.name,
+          size: formatBytes(row.len),
+          date: row.atime ? new Date(row.atime).toISOString().slice(0, 10) : '',
+          magnet: simplifyMagnet(m[0]),
+          detailUrl,
+          source: 'taocili',
+        });
       } catch (e) { /* 单条详情失败跳过 */ }
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, rows.length) }, worker));
-  return rows;
-}
-
-async function fetchFromX1337x(query, page, sort, waitUntil) {
-  const config = getDomainsConfig();
-  const cfg = config.x1337x || [];
-  const domains = (cfg.length ? cfg : X1337X_CANDIDATES).slice(0, 4);
-  const failures = [];
-  for (const domain of domains) {
-    // 偶发验证时对同一域名重试一次，仍失败才换下一个
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const url = `${domain}/search/${encodeURIComponent(query)}/${Math.max(1, page || 1)}/`;
-        const html = await fetchX1337x(url);
-        const items = parseX1337xRows(html);
-        if (!items.length) { failures.push(`${domain}=无结果`); break; }
-        await attachX1337xMagnets(domain, items.slice(0, 15), waitUntil);
-        const hits = items.filter((it) => it.magnet);
-        if (hits.length) {
-          X1337X_DEBUG = { tried: domains, failures: [...failures, `${domain}=成功(${hits.length}条)`], status: 'ok' };
-          return hits.map((it) => ({
-            name: it.name,
-            size: it.size,
-            date: it.date,
-            seeds: it.seeds,
-            peers: it.peers,
-            magnet: it.magnet,
-            detailUrl: `${domain}${it.detailPath}`,
-            source: 'x1337x',
-          }));
-        }
-        failures.push(`${domain}=详情未取到magnet`);
-        break;
-      } catch (e) {
-        if (attempt === 0) { continue; } // 重试一次（应对偶发 CF 验证）
-        failures.push(`${domain}=${e.message}`);
-      }
-    }
-  }
-  X1337X_DEBUG = { tried: domains, failures, status: 'empty' };
-  if (failures.length) console.error('1337x failures:', failures.join(' | '));
-  return [];
+  return results;
 }
 
 async function fetchWithCache(url, ttl, waitUntil) {
