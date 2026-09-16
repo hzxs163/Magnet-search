@@ -13,6 +13,14 @@ const JUNIORTER_PROVIDERS = [
 
 const KNABEN_API = 'https://api.knaben.org/v1';
 
+// ========== 1337x（可直连镜像自动轮换） ==========
+const X1337X_CANDIDATES = ['https://1337x.la', 'https://1337x.st', 'https://www.1337x.tw', 'https://www.1337xx.to', 'https://1337xto.to'];
+const X1337X_UA = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'zh-CN,zh;q=0.9',
+};
+
 let CCTV10_DEBUG = {};
 let CILIMAO_DEBUG = {};
 
@@ -23,7 +31,7 @@ export async function onRequest(context) {
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
 
-  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso';
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,x1337x';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
 
   if (!query) {
@@ -67,6 +75,9 @@ export async function onRequest(context) {
     }
     if (sources.includes('ciliso')) {
       tasks.push({ name: 'ciliso', promise: fetchFromCilibaike(query, page, sort, waitUntil, 'ciliso') });
+    }
+    if (sources.includes('x1337x')) {
+      tasks.push({ name: 'x1337x', promise: fetchFromX1337x(query, page, sort, waitUntil) });
     }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
@@ -146,6 +157,7 @@ function getDomainsConfig() {
     cctv10: Array.isArray(data.cctv10) ? data.cctv10 : [],
     cilimao: Array.isArray(data.cilimao) ? data.cilimao : [],
     ciliso: Array.isArray(data.ciliso) ? data.ciliso : [],
+    x1337x: Array.isArray(data.x1337x) ? data.x1337x : [],
   };
 }
 
@@ -776,6 +788,107 @@ async function batchFetchCilimaoDetails(links, concurrency, domain, waitUntil) {
 }
 
 // ========== 工具函数 ==========
+// ========== 1337x ==========
+// 不走 fetchWithCache：偶发 CF 验证页绝不能进缓存（缓存会把“验证页”固化导致源一直 0 结果）
+// 注意：正常 1337x 页面也引用 challenge-platform 脚本，判定只认验证页特有字样，不能误伤真页
+function fetchX1337x(url) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10000);
+  return fetch(url, { headers: X1337X_UA, signal: ctrl.signal })
+    .then(async (resp) => {
+      clearTimeout(timer);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const text = await resp.text();
+      if (/<title>\s*(just a moment|attention required|请稍候)/i.test(text)) {
+        throw new Error('CF验证');
+      }
+      return text;
+    })
+    .catch((e) => {
+      clearTimeout(timer);
+      throw e;
+    });
+}
+
+function parseX1337xRows(html) {
+  const rows = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)].map((m) => m[1]).filter((r) => /torrent\/\d+/.test(r));
+  const items = [];
+  for (const row of rows) {
+    const link = [...row.matchAll(/<a[^>]*href="(\/torrent\/\d+\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/g)]
+      .find((m) => m[2].replace(/<[^>]+>/g, '').trim());
+    if (!link) continue;
+    const name = link[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    if (!name) continue;
+    items.push({
+      name,
+      detailPath: link[1],
+      size: ((row.match(/coll-4 size[^>]*>([^<]+)/) || [])[1] || '').trim(),
+      seeds: parseInt(((row.match(/coll-2 seeds[^>]*>([^<]+)/) || [])[1] || '0').replace(/[^\d]/g, '')) || 0,
+      peers: parseInt(((row.match(/coll-3 leeches[^>]*>([^<]+)/) || [])[1] || '0').replace(/[^\d]/g, '')) || 0,
+      date: ((row.match(/coll-date[^>]*>([^<]+)/) || [])[1] || '').trim(),
+    });
+  }
+  return items;
+}
+
+// 详情页并发抓 magnet（限量并发，单条失败跳过，不拖整体）
+async function attachX1337xMagnets(domain, rows, waitUntil) {
+  const CONCURRENCY = 6;
+  let idx = 0;
+  const worker = async () => {
+    while (idx < rows.length) {
+      const i = idx++;
+      const row = rows[i];
+      try {
+        const html = await fetchX1337x(`${domain}${row.detailPath}`);
+        const m = html.match(/magnet:\?xt=urn:btih:[a-zA-Z0-9]+[^"'\s]*/);
+        if (m) row.magnet = simplifyMagnet(m[0]);
+      } catch (e) { /* 单条详情失败跳过 */ }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, rows.length) }, worker));
+  return rows;
+}
+
+async function fetchFromX1337x(query, page, sort, waitUntil) {
+  const config = getDomainsConfig();
+  const cfg = config.x1337x || [];
+  const domains = (cfg.length ? cfg : X1337X_CANDIDATES).slice(0, 4);
+  const failures = [];
+  for (const domain of domains) {
+    // 偶发验证时对同一域名重试一次，仍失败才换下一个
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const url = `${domain}/search/${encodeURIComponent(query)}/${Math.max(1, page || 1)}/`;
+        const html = await fetchX1337x(url);
+        const items = parseX1337xRows(html);
+        if (!items.length) { failures.push(`${domain}=无结果`); break; }
+        await attachX1337xMagnets(domain, items.slice(0, 15), waitUntil);
+        const hits = items.filter((it) => it.magnet);
+        if (hits.length) {
+          return hits.map((it) => ({
+            name: it.name,
+            size: it.size,
+            date: it.date,
+            seeds: it.seeds,
+            peers: it.peers,
+            magnet: it.magnet,
+            detailUrl: `${domain}${it.detailPath}`,
+            source: 'x1337x',
+          }));
+        }
+        failures.push(`${domain}=详情未取到magnet`);
+        break;
+      } catch (e) {
+        if (attempt === 0) { continue; } // 重试一次（应对偶发 CF 验证）
+        failures.push(`${domain}=${e.message}`);
+      }
+    }
+  }
+  if (failures.length) console.error('1337x failures:', failures.join(' | '));
+  return [];
+}
+
 async function fetchWithCache(url, ttl, waitUntil) {
   const cacheKey = new Request(url, { method: 'GET' });
   const cache = caches.default;
