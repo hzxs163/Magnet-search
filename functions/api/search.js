@@ -812,6 +812,7 @@ async function fetchFromTaocili(query, page, sort, waitUntil) {
   else if (sort === 'length') sortParam = 'size_desc';
 
   const start = Math.max(0, (Math.max(1, page || 1) - 1) * 20);
+  const searchNotes = [];
 
   for (const domain of domains) {
     try {
@@ -820,22 +821,33 @@ async function fetchFromTaocili(query, page, sort, waitUntil) {
       const text = await fetchWithCache(apiUrl, 1800, waitUntil);
       let data;
       try { data = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
-      if (!data || data.code !== 0 || !Array.isArray(data.items)) continue;
+      if (!data || data.code !== 0 || !Array.isArray(data.items)) {
+        searchNotes.push(`${domain}: code=${data && data.code} items=${data && Array.isArray(data.items) ? data.items.length : '无'}`);
+        continue;
+      }
       const rows = data.items.filter((it) => it && it.name && it._id).slice(0, 20);
-      if (rows.length === 0) continue;
+      if (rows.length === 0) {
+        searchNotes.push(`${domain}: 搜索无结果`);
+        continue;
+      }
       const items = await batchFetchTaociliMagnets(rows, domain, waitUntil);
       if (items.length > 0) return items;
+      const f = items.failures || {};
+      searchNotes.push(`${domain}: 搜索${rows.length}条但详情页全失败 (http=${f.http||0} 无magnet=${f.empty||0} 其他=${f.other||0})`);
     } catch (err) {
+      searchNotes.push(`${domain}: ${err && err.message ? err.message : String(err)}`);
       console.error(`Taocili domain ${domain} failed:`, err);
     }
   }
-  return [];
+  // 把诊断信息抛给上层（debug.taociliError 可见），不静默吞掉
+  throw new Error('淘磁力全域名失败: ' + (searchNotes.join(' | ') || '无可用域名'));
 }
 
 // 详情页并发抓 magnet（限量并发，单条失败跳过，不拖整体）
 async function batchFetchTaociliMagnets(rows, domain, waitUntil) {
   const CONCURRENCY = 6;
   const results = [];
+  const failures = { http: 0, empty: 0, other: 0 };
   let idx = 0;
   const worker = async () => {
     while (idx < rows.length) {
@@ -843,9 +855,19 @@ async function batchFetchTaociliMagnets(rows, domain, waitUntil) {
       const row = rows[i];
       try {
         const detailUrl = `${domain}/magnet/${row._id}`;
-        const html = await fetchWithCache(detailUrl, 3600, waitUntil);
+        // 详情页加 Referer（站点可能校验来源），不用公共缓存以免串头
+        const resp = await fetch(detailUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': `${domain}/`,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+          },
+        });
+        if (!resp.ok) { failures.http++; continue; }
+        const html = await resp.text();
         const m = html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{40}/);
-        if (!m) continue;
+        if (!m) { failures.empty++; continue; }
         results.push({
           name: row.name,
           size: formatBytes(row.len),
@@ -854,10 +876,11 @@ async function batchFetchTaociliMagnets(rows, domain, waitUntil) {
           detailUrl,
           source: 'taocili',
         });
-      } catch (e) { /* 单条详情失败跳过 */ }
+      } catch (e) { failures.other++; }
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, rows.length) }, worker));
+  results.failures = failures;   // 附加统计，供上层诊断
   return results;
 }
 
@@ -907,19 +930,13 @@ async function fetchFromTpb(query, page, sort, waitUntil) {
   for (const domain of domains) {
     try {
       const url = `${domain}/q.php?q=${encodeURIComponent(query)}&cat=0`;
-      const text = await fetchWithCache(url, 180, waitUntil);
+      const text = await fetchWithCache(url, 900, waitUntil);
       let arr;
       try { arr = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
       if (!Array.isArray(arr)) continue;
       // apibay 无结果时返回一条 id=0 的占位记录，要滤掉
-      const real = arr.filter((r) => r && r.id !== '0' && r.info_hash && !/^0+$/.test(r.info_hash));
-      if (real.length === 0) {
-        // 占位空结果（id=0）说明这词当前确实没货：删掉刚写入的缓存，避免"空结果被缓存几分钟"
-        // 让下次搜索能重新请求，而不是被缓存卡死显示 0 条
-        try { await caches.default.delete(new Request(url, { method: 'GET' })); } catch (e) {}
-        return [];
-      }
-      return real
+      return arr
+        .filter((r) => r && r.id !== '0' && r.info_hash && !/^0+$/.test(r.info_hash))
         .map((r) => ({
           name: r.name || '',
           size: formatBytes(Number(r.size) || 0),
