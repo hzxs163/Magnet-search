@@ -23,7 +23,7 @@ export async function onRequest(context) {
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
 
-  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili';
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,therarbg,eztv';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
 
   if (!query) {
@@ -70,6 +70,15 @@ export async function onRequest(context) {
     }
     if (sources.includes('taocili')) {
       tasks.push({ name: 'taocili', promise: fetchFromTaocili(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('tpb')) {
+      tasks.push({ name: 'tpb', promise: fetchFromTpb(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('therarbg')) {
+      tasks.push({ name: 'therarbg', promise: fetchFromTherarbg(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('eztv')) {
+      tasks.push({ name: 'eztv', promise: fetchFromEztvSmart(query, page, sort, waitUntil) });
     }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
@@ -150,6 +159,9 @@ function getDomainsConfig() {
     cilimao: Array.isArray(data.cilimao) ? data.cilimao : [],
     ciliso: Array.isArray(data.ciliso) ? data.ciliso : [],
     taocili: Array.isArray(data.taocili) ? data.taocili : [],
+    tpb: Array.isArray(data.tpb) ? data.tpb : [],
+    therarbg: Array.isArray(data.therarbg) ? data.therarbg : [],
+    eztv: Array.isArray(data.eztv) ? data.eztv : [],
   };
 }
 
@@ -789,9 +801,24 @@ function b64FromUtf8(str) {
   return btoa(bin);
 }
 
+// 淘磁力发布页（wangzhi.icu/config.js）：域名经常更换，失败时实时拉取最新域名跟随
+const TAOCILI_PUBLISH_URL = 'https://wangzhi.icu/config.js';
+async function getFreshTaociliDomains(waitUntil) {
+  try {
+    const text = await fetchWithCache(TAOCILI_PUBLISH_URL, 600, waitUntil);
+    // config.js 形如：{ id: 'cl', name: '淘磁力', urls: ['https://taociliX.shop', ...] }
+    const block = (text.match(/\{[^{}]*淘磁力[^{}]*\}/) || [null])[0];
+    if (!block) return [];
+    const urls = [...block.matchAll(/['"](https?:\/\/[^'"]+)['"]/g)].map((m) => m[1]);
+    return [...new Set(urls)].filter((u) => /^https?:\/\//.test(u));
+  } catch (e) {
+    return [];
+  }
+}
+
 async function fetchFromTaocili(query, page, sort, waitUntil) {
   const config = getDomainsConfig();
-  const domains = config.taocili;
+  let domains = config.taocili || [];
   if (domains.length === 0) return [];
 
   const keyword = encodeURIComponent(b64FromUtf8(query));
@@ -800,30 +827,67 @@ async function fetchFromTaocili(query, page, sort, waitUntil) {
   else if (sort === 'length') sortParam = 'size_desc';
 
   const start = Math.max(0, (Math.max(1, page || 1) - 1) * 20);
+  const searchNotes = [];
 
-  for (const domain of domains) {
-    try {
-      // 站点前端实际翻页参数是 start(偏移)/count(条数)，不是 page
-      const apiUrl = `${domain}/apis/search?keyword=${keyword}&base64=1&detail=1&start=${start}&count=20&type=all&sort=${sortParam}`;
-      const text = await fetchWithCache(apiUrl, 1800, waitUntil);
-      let data;
-      try { data = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
-      if (!data || data.code !== 0 || !Array.isArray(data.items)) continue;
-      const rows = data.items.filter((it) => it && it.name && it._id).slice(0, 20);
-      if (rows.length === 0) continue;
-      const items = await batchFetchTaociliMagnets(rows, domain, waitUntil);
-      if (items.length > 0) return items;
-    } catch (err) {
-      console.error(`Taocili domain ${domain} failed:`, err);
+  const tryDomains = async (list, label) => {
+    for (const domain of list) {
+      try {
+        const apiUrl = `${domain}/apis/search?keyword=${keyword}&base64=1&detail=1&start=${start}&count=20&type=all&sort=${sortParam}`;
+        let text;
+        try {
+          text = await fetchWithCache(apiUrl, 1800, waitUntil);
+        } catch (err) {
+          // 5xx（套 CF 的站对 Workers 出口常返回 520）：换移动端 UA 重试一次
+          try {
+            text = await fetchWithCache(apiUrl, 60, waitUntil, {
+              'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            });
+          } catch (err2) {
+            throw new Error(`${err.message}; 移动UA重试: ${err2.message}`);
+          }
+        }
+        let data;
+        try { data = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
+        if (!data || data.code !== 0 || !Array.isArray(data.items)) {
+          searchNotes.push(`${domain}${label}: code=${data && data.code} items=${data && Array.isArray(data.items) ? data.items.length : '无'}`);
+          continue;
+        }
+        const rows = data.items.filter((it) => it && it.name && it._id).slice(0, 20);
+        if (rows.length === 0) { searchNotes.push(`${domain}${label}: 搜索无结果`); continue; }
+        const items = await batchFetchTaociliMagnets(rows, domain, waitUntil);
+        if (items.length > 0) return items;
+        const f = items.failures || {};
+        searchNotes.push(`${domain}${label}: 搜索${rows.length}条但详情页全失败 (http=${f.http||0} 无magnet=${f.empty||0} 其他=${f.other||0})`);
+      } catch (err) {
+        searchNotes.push(`${domain}${label}: ${err && err.message ? err.message : String(err)}`);
+        console.error(`Taocili domain ${domain} failed:`, err);
+      }
     }
+    return null;
+  };
+
+  // 第一轮：配置文件里的域名
+  const r1 = await tryDomains(domains, '');
+  if (r1) return r1;
+
+  // 第二轮：配置全失败时，实时拉发布页最新域名跟随（站点换域名后自动恢复）
+  const fresh = await getFreshTaociliDomains(waitUntil);
+  const freshUnknown = fresh.filter((d) => !domains.includes(d));
+  if (freshUnknown.length > 0) {
+    const r2 = await tryDomains(freshUnknown, '(发布页)');
+    if (r2) return r2;
   }
-  return [];
+
+  // 把诊断信息抛给上层（debug.taociliError 可见），不静默吞掉
+  throw new Error('淘磁力全域名失败: ' + (searchNotes.join(' | ') || '无可用域名'));
 }
 
 // 详情页并发抓 magnet（限量并发，单条失败跳过，不拖整体）
 async function batchFetchTaociliMagnets(rows, domain, waitUntil) {
   const CONCURRENCY = 6;
   const results = [];
+  const failures = { http: 0, empty: 0, other: 0 };
   let idx = 0;
   const worker = async () => {
     while (idx < rows.length) {
@@ -831,9 +895,19 @@ async function batchFetchTaociliMagnets(rows, domain, waitUntil) {
       const row = rows[i];
       try {
         const detailUrl = `${domain}/magnet/${row._id}`;
-        const html = await fetchWithCache(detailUrl, 3600, waitUntil);
+        // 详情页加 Referer（站点可能校验来源），不用公共缓存以免串头
+        const resp = await fetch(detailUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': `${domain}/`,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+          },
+        });
+        if (!resp.ok) { failures.http++; continue; }
+        const html = await resp.text();
         const m = html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{40}/);
-        if (!m) continue;
+        if (!m) { failures.empty++; continue; }
         results.push({
           name: row.name,
           size: formatBytes(row.len),
@@ -842,14 +916,15 @@ async function batchFetchTaociliMagnets(rows, domain, waitUntil) {
           detailUrl,
           source: 'taocili',
         });
-      } catch (e) { /* 单条详情失败跳过 */ }
+      } catch (e) { failures.other++; }
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, rows.length) }, worker));
+  results.failures = failures;
   return results;
 }
 
-async function fetchWithCache(url, ttl, waitUntil) {
+async function fetchWithCache(url, ttl, waitUntil, extraHeaders) {
   const cacheKey = new Request(url, { method: 'GET' });
   const cache = caches.default;
 
@@ -860,6 +935,7 @@ async function fetchWithCache(url, ttl, waitUntil) {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'zh-CN,zh;q=0.9',
+        ...(extraHeaders || {}),
       },
     });
     if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
@@ -880,6 +956,130 @@ async function fetchWithCache(url, ttl, waitUntil) {
   }
 
   return await response.text();
+}
+// ========== TPB（apibay 官方 API，一次返回全部命中） ==========
+const TPB_DOMAINS = ['https://apibay.org'];
+function isoFromUnix(sec) {
+  const n = Number(sec);
+  return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toISOString().slice(0, 10) : '';
+}
+
+async function fetchFromTpb(query, page, sort, waitUntil) {
+  const cfg = getDomainsConfig().tpb;
+  const domains = (cfg && cfg.length) ? cfg : TPB_DOMAINS;
+  for (const domain of domains) {
+    try {
+      const url = `${domain}/q.php?q=${encodeURIComponent(query)}&cat=0`;
+      const text = await fetchWithCache(url, 900, waitUntil);
+      let arr;
+      try { arr = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
+      if (!Array.isArray(arr)) continue;
+      // apibay 无结果时返回一条 id=0 的占位记录，要滤掉
+      return arr
+        .filter((r) => r && r.id !== '0' && r.info_hash && !/^0+$/.test(r.info_hash))
+        .map((r) => ({
+          name: r.name || '',
+          size: formatBytes(Number(r.size) || 0),
+          date: isoFromUnix(r.added),
+          seeds: Number(r.seeders) || 0,
+          peers: Number(r.leechers) || 0,
+          magnet: `magnet:?xt=urn:btih:${String(r.info_hash).toLowerCase()}`,
+          detailUrl: r.id ? `https://thepiratebay.org/description.php?id=${r.id}` : '',
+          source: 'tpb',
+          imdb: r.imdb || '',
+        }))
+        .filter((it) => it.name && it.magnet);
+    } catch (err) {
+      console.error(`TPB domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+// ========== therarbg（RARBG 延续，JSON API；多词必须 %20 编码，用 + 会返回 0 条） ==========
+const THERARBG_DOMAINS = ['https://therarbg.com'];
+async function fetchFromTherarbg(query, page, sort, waitUntil) {
+  const cfg = getDomainsConfig().therarbg;
+  const domains = (cfg && cfg.length) ? cfg : THERARBG_DOMAINS;
+  for (const domain of domains) {
+    try {
+      const kw = encodeURIComponent(query).replace(/\+/g, '%20');
+      const url = `${domain}/get-posts/keywords:${kw}/?format=json`;
+      const text = await fetchWithCache(url, 900, waitUntil);
+      let j;
+      try { j = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
+      if (!j || !Array.isArray(j.results)) continue;
+      return j.results
+        .map((r) => ({
+          name: r.n || '',
+          size: formatBytes(Number(r.s) || 0),
+          date: isoFromUnix(r.a),
+          seeds: Number(r.se) || 0,
+          peers: Number(r.le) || 0,
+          magnet: r.h ? `magnet:?xt=urn:btih:${String(r.h).toLowerCase()}` : '',
+          detailUrl: r.pk ? `${domain}/post-detail/${r.pk}/` : '',
+          source: 'therarbg',
+          imdb: r.i || '',
+        }))
+        .filter((it) => it.name && it.magnet);
+    } catch (err) {
+      console.error(`therarbg domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+// ========== EZTV（镜像 API，只能按 imdb_id 查询） ==========
+const EZTV_DOMAINS = ['https://eztvx.to', 'https://eztv.re', 'https://eztv.tf'];
+async function fetchFromEztv(imdbId, page, sort, waitUntil) {
+  const id = String(imdbId || '').replace(/^tt/i, '');
+  if (!/^\d{5,}$/.test(id)) return [];
+  const cfg = getDomainsConfig().eztv;
+  const domains = (cfg && cfg.length) ? cfg : EZTV_DOMAINS;
+  for (const domain of domains) {
+    try {
+      const url = `${domain}/api/get-torrents?imdb_id=${id}&limit=100&page=${Math.max(1, page || 1)}`;
+      const text = await fetchWithCache(url, 3600, waitUntil);
+      let j;
+      try { j = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
+      if (!j || !Array.isArray(j.torrents)) continue;
+      return j.torrents
+        .map((t) => ({
+          name: t.title || t.filename || '',
+          size: formatBytes(Number(t.size_bytes) || 0),
+          date: isoFromUnix(t.date_released_unix),
+          seeds: Number(t.seeds) || 0,
+          peers: Number(t.peers) || 0,
+          magnet: t.magnet_url ? simplifyMagnet(t.magnet_url) : '',
+          detailUrl: t.episode_url || '',
+          source: 'eztv',
+        }))
+        .filter((it) => it.name && it.magnet);
+    } catch (err) {
+      console.error(`EZTV domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+// EZTV 只能按 IMDb 编号查：先从 TPB/RARBG 结果里收集 imdb 字段，取出现最多的编号去查
+async function fetchFromEztvSmart(query, page, sort, waitUntil) {
+  const counts = new Map();
+  for (const fn of [fetchFromTpb, fetchFromTherarbg]) {
+    try {
+      const items = await fn(query, page, sort, waitUntil);
+      for (const it of items) {
+        const id = String(it.imdb || '').replace(/^tt/i, '');
+        if (/^\d{5,}$/.test(id)) counts.set(id, (counts.get(id) || 0) + 1);
+      }
+    } catch (e) { /* 单个源失败不影响推断 */ }
+  }
+  if (!counts.size) return [];
+  let best = '', bestN = 0;
+  for (const [id, n] of counts) {
+    if (n > bestN) { best = id; bestN = n; }
+  }
+  return fetchFromEztv(best, page, sort, waitUntil);
 }
 
 function jsonResponse(data, status = 200) {
