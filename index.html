@@ -335,30 +335,7 @@
       letter-spacing: .3px;
     }
 
-    
-    .seed-badge {
-      display: inline-block;
-      padding: 1px 8px;
-      border-radius: 10px;
-      font-size: 12px;
-      font-weight: 600;
-      margin-right: 4px;
-      white-space: nowrap;
-    }
-    .seed-badge.ok   { background: #dcfce7; color: #166534; }
-    .seed-badge.warn { background: #fef3c7; color: #92400e; }
-    .seed-badge.dead { background: #fee2e2; color: #991b1b; }
-    .seed-badge.na   { background: #f3f4f6; color: #6b7280; }
-    .seed-filter {
-      font-size: 12px;
-      padding: 2px 6px;
-      border: 1px solid #d1d5db;
-      border-radius: 6px;
-      background: #fff;
-      color: #333;
-      margin-left: 8px;
-    }
-.magnet-row {
+    .magnet-row {
       display: flex;
       align-items: center;
       gap: 6px;
@@ -774,70 +751,18 @@
     const SOURCES = [
       { id: '0magnet',   label: 'ØMagnet' },
       { id: 'xiaocao',   label: '小草磁力' },
+      { id: 'juniorter', label: 'Juniorter' },
       { id: 'cilibaike', label: '磁力百科' },
+      { id: 'knaben',    label: 'Knaben' },
       { id: 'yuhuage',   label: '雨花阁' },
       { id: 'hufeng',    label: '虎风' },
+      { id: 'cctv10',    label: 'U3C3' },
       { id: 'cilimao', label: '磁力猫' },
       { id: 'ciliso', label: '磁力搜' },
       { id: 'taocili', label: '淘磁力' },
-      { id: 'cctv10',    label: 'U3C3' },
-      { id: 'knaben',    label: 'Knaben' },
-      { id: 'juniorter', label: 'Juniorter' },
-      { id: 'tpb',      label: 'TPB' },
-      { id: 'therarbg', label: 'RARBG' },
-      { id: 'eztv',     label: 'EZTV' },
     ];
 
     const DEFAULT_SOURCES = ['0magnet'];
-
-    // ===== 结果缓存：切换源秒出 + 后台全源预取 =====
-    const resultCache = new Map();          // key = `${query}||${sort}` -> { data(全源结果), ts }
-    const CACHE_TTL = 5 * 60 * 1000;        // 缓存 5 分钟
-    const cacheKeyFor = (q, sort) => `${q}||${sort}`;
-
-    // 按当前勾选源过滤全源缓存结果（每条结果带 source 字段）
-    function filterBySources(results, sources) {
-      if (!sources || sources.length === 0) return results;
-      const set = new Set(sources);
-      return results.filter((it) => set.has(it.source));
-    }
-
-    // 后台预取：把「全部源」的搜索结果填进缓存（不阻塞 UI、不显示 loading）
-    async function prefetchAllSources(query) {
-      try {
-        const ck = cacheKeyFor(query, currentSort);
-        if (resultCache.has(ck)) return;               // 已有缓存，不重复打
-        const allSources = SOURCES.map((s) => s.id);
-        const url = `${API_BASE}/api/search?q=${encodeURIComponent(query)}&page=1&sort=${currentSort}&sources=${encodeURIComponent(allSources.join(','))}`;
-        const res = await fetch(url);
-        if (!res.ok) return;
-        const data = await res.json();
-        resultCache.set(ck, { data, ts: Date.now() });
-        console.log(`[预取] ${query} 全源 ${data.total || 0} 条已缓存`);
-      } catch (e) {
-        /* 预取失败静默忽略，不影响用户操作 */
-      }
-    }
-
-    // 切换源后：关键词没变且全源缓存就绪 → 本地过滤秒出（绕过 isLoading）
-    function tryInstantSearch(query) {
-      if (!query) return false;
-      const ck = cacheKeyFor(query, currentSort);
-      const cached = resultCache.get(ck);
-      if (!cached || Date.now() - cached.ts >= CACHE_TTL) return false;
-      const sources = getSelectedSources();
-      if (sources.length === 0) return false;
-      currentQuery = query;
-      currentPage = 1;
-      header.classList.add('compact');
-      hotSearches.style.display = 'none';
-      const filtered = filterBySources(cached.data.results, sources);
-      renderResults({ ...cached.data, results: filtered, total: filtered.length }, query, 1);
-      return true;
-    }
-    // 兼容调用名
-    const tryInstantSwitch = tryInstantSearch;
-
 
     // ---------- qBittorrent ----------
     const QB_STORAGE_KEY = 'qb_config';
@@ -1013,15 +938,6 @@
             selectedSources.add(s.id);
           }
           el.toggleAttribute('data-on');
-          // 关键词没变：优先走本地缓存秒出，不重新请求
-          if (currentQuery) {
-            const srcs = getSelectedSources();
-            if (srcs.length === 0) {
-              showEmptySourceHint();   // 全部取消：温和提示，不弹窗
-            } else if (!tryInstantSwitch()) {
-              doSearch(currentQuery, 1);
-            }
-          }
         });
         chipsEl.appendChild(el);
       }
@@ -1030,23 +946,6 @@
     function getSelectedSources() {
       return SOURCES.filter(s => selectedSources.has(s.id)).map(s => s.id);
     }
-
-    // 全部源被取消时：结果区显示温和提示（不弹窗）
-    function showEmptySourceHint() {
-      header.classList.add('compact');
-      hotSearches.style.display = 'none';
-      resultArea.innerHTML = `
-        <div class="result-bar">
-          <span>未勾选任何源</span>
-        </div>
-        <div class="empty-state">
-          <div class="icon">🍃</div>
-          <div class="title">请至少勾选一个源</div>
-          <div class="desc">在上方勾选想搜索的源即可继续</div>
-        </div>
-      `;
-    }
-
 
     loadQbConfig();
     buildChips();
@@ -1071,12 +970,7 @@
 
       const sources = getSelectedSources();
       if (sources.length === 0) {
-        showEmptySourceHint();
-        return;
-      }
-
-      // 缓存命中：关键词+排序没变，直接渲染（首次搜索无缓存，走正常请求）
-      if (page === 1 && tryInstantSearch(query)) {
+        alert('请至少选择一个源');
         return;
       }
 
@@ -1116,9 +1010,6 @@
         const data = await res.json();
         renderResults(data, query, page);
 
-        // 后台无感预取「全部源」，为切换源秒出做准备（不阻塞当前显示）
-        if (page === 1) prefetchAllSources(query);
-
       } catch (err) {
         console.error('搜索失败:', err);
         renderError();
@@ -1128,34 +1019,6 @@
         searchBtn.textContent = '搜索';
       }
     }
-
-    function seedNum(item) {
-      const raw = item ? item.seeds : undefined;
-      if (raw === undefined || raw === null || raw === '') return -1; // 无种子数据（中文源等）
-      const n = parseInt(raw, 10);
-      return Number.isFinite(n) ? n : -1;
-    }
-
-    function seedBadge(item) {
-      const n = seedNum(item);
-      const cls = n >= 5 ? 'ok' : (n >= 1 ? 'warn' : (n === 0 ? 'dead' : 'na'));
-      const label = n < 0 ? '种子未知' : (n > 0 ? n + ' 种子' : '0 种子');
-      return `<span class="seed-badge ${cls}" data-seeds="${n}">${label}</span>`;
-    }
-
-    let currentMinSeed = 0;
-    const applySeedFilter = () => {
-      const min = currentMinSeed;
-      let visible = 0;
-      document.querySelectorAll('.result-card').forEach((card) => {
-        const n = parseInt(card.dataset.seeds, 10);
-        const show = (Number.isFinite(n) && n < 0) ? true : n >= min; // 无数据不误伤
-        card.style.display = show ? '' : 'none';
-        if (show) visible++;
-      });
-      const countEl = document.getElementById('streamCount');
-      if (countEl) countEl.innerHTML = `本页 ${visible} 条结果${min > 0 ? '（已过滤 0 种子）' : ''}`;
-    };
 
     function renderResults(data, query, page) {
       const results = data.results || [];
@@ -1175,13 +1038,8 @@
 
       let html = `
         <div class="result-bar">
-          <span id="streamCount">本页 ${total} 条结果 <span class="timing">— ${timing} ms</span></span>
+          <span>本页 ${total} 条结果 <span class="timing">— ${timing} ms</span></span>
           <div class="sort-options">
-            <select id="minSeedFilter" class="seed-filter" title="按种子数过滤（0 种子=基本下不动）">
-              <option value="0">全部种子</option>
-              <option value="1">≥1 种子</option>
-              <option value="5">≥5 种子</option>
-            </select>
             <a href="javascript:void(0)" data-sort="relevance" class="${currentSort === 'relevance' ? 'active' : ''}">相关</a>
             <a href="javascript:void(0)" data-sort="newest" class="${currentSort === 'newest' ? 'active' : ''}">最新</a>
           </div>
@@ -1197,13 +1055,12 @@
         const source = item.source || '';
 
         html += `
-          <div class="result-card" data-seeds="${seedNum(item)}">
+          <div class="result-card">
             <a class="result-title" href="${item.detailUrl || '#'}" target="_blank" rel="noopener">
               ${name}
             </a>
             <div class="result-meta">
               <div class="result-meta-left">
-                ${seedBadge(item)}
                 <span>${size}</span>
                 ${date ? `<span class="dot">·</span><span>${date}</span>` : ''}
                 ${source ? `<span class="result-source">${escapeHtml(source)}</span>` : ''}
@@ -1237,15 +1094,6 @@
       `;
 
       resultArea.innerHTML = html;
-
-      const filterSel = document.getElementById('minSeedFilter');
-      if (filterSel) {
-        filterSel.value = String(currentMinSeed);
-        filterSel.addEventListener('change', () => {
-          currentMinSeed = parseInt(filterSel.value, 10) || 0;
-          applySeedFilter();
-        });
-      }
 
       resultArea.querySelectorAll('.magnet-row').forEach(row => {
         const link = row.querySelector('.magnet-link');
@@ -1291,9 +1139,6 @@
           doSearch(currentQuery, 1);
         });
       });
-
-      // 之前设过种子过滤条件 → 新渲染的结果也自动应用（切源秒出后过滤不失效）
-      if (currentMinSeed > 0) applySeedFilter();
 
       const prevBtn = document.getElementById('prevBtn');
       const nextBtn = document.getElementById('nextBtn');
