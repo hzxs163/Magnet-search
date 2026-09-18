@@ -774,21 +774,70 @@
     const SOURCES = [
       { id: '0magnet',   label: 'ØMagnet' },
       { id: 'xiaocao',   label: '小草磁力' },
-      { id: 'cilibaike', label: '磁力百科' },      
+      { id: 'juniorter', label: 'Juniorter' },
+      { id: 'cilibaike', label: '磁力百科' },
+      { id: 'knaben',    label: 'Knaben' },
       { id: 'yuhuage',   label: '雨花阁' },
-      { id: 'hufeng',    label: '虎风' },      
+      { id: 'hufeng',    label: '虎风' },
+      { id: 'cctv10',    label: 'U3C3' },
       { id: 'cilimao', label: '磁力猫' },
       { id: 'ciliso', label: '磁力搜' },
       { id: 'taocili', label: '淘磁力' },
-      { id: 'cctv10',    label: 'U3C3' },
-      { id: 'knaben',    label: 'Knaben' },
-      { id: 'juniorter', label: 'Juniorter' },
       { id: 'tpb',      label: 'TPB' },
       { id: 'therarbg', label: 'RARBG' },
       { id: 'eztv',     label: 'EZTV' },
     ];
 
     const DEFAULT_SOURCES = ['0magnet'];
+
+    // ===== 结果缓存：切换源秒出 + 后台全源预取 =====
+    const resultCache = new Map();          // key = `${query}||${sort}` -> { data(全源结果), ts }
+    const CACHE_TTL = 5 * 60 * 1000;        // 缓存 5 分钟
+    const cacheKeyFor = (q, sort) => `${q}||${sort}`;
+
+    // 按当前勾选源过滤全源缓存结果（每条结果带 source 字段）
+    function filterBySources(results, sources) {
+      if (!sources || sources.length === 0) return results;
+      const set = new Set(sources);
+      return results.filter((it) => set.has(it.source));
+    }
+
+    // 后台预取：把「全部源」的搜索结果填进缓存（不阻塞 UI、不显示 loading）
+    async function prefetchAllSources(query) {
+      try {
+        const ck = cacheKeyFor(query, currentSort);
+        if (resultCache.has(ck)) return;               // 已有缓存，不重复打
+        const allSources = SOURCES.map((s) => s.id);
+        const url = `${API_BASE}/api/search?q=${encodeURIComponent(query)}&page=1&sort=${currentSort}&sources=${encodeURIComponent(allSources.join(','))}`;
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const data = await res.json();
+        resultCache.set(ck, { data, ts: Date.now() });
+        console.log(`[预取] ${query} 全源 ${data.total || 0} 条已缓存`);
+      } catch (e) {
+        /* 预取失败静默忽略，不影响用户操作 */
+      }
+    }
+
+    // 切换源后：关键词没变且全源缓存就绪 → 本地过滤秒出（绕过 isLoading）
+    function tryInstantSearch(query) {
+      if (!query) return false;
+      const ck = cacheKeyFor(query, currentSort);
+      const cached = resultCache.get(ck);
+      if (!cached || Date.now() - cached.ts >= CACHE_TTL) return false;
+      const sources = getSelectedSources();
+      if (sources.length === 0) return false;
+      currentQuery = query;
+      currentPage = 1;
+      header.classList.add('compact');
+      hotSearches.style.display = 'none';
+      const filtered = filterBySources(cached.data.results, sources);
+      renderResults({ ...cached.data, results: filtered, total: filtered.length }, query, 1);
+      return true;
+    }
+    // 兼容调用名
+    const tryInstantSwitch = tryInstantSearch;
+
 
     // ---------- qBittorrent ----------
     const QB_STORAGE_KEY = 'qb_config';
@@ -964,6 +1013,8 @@
             selectedSources.add(s.id);
           }
           el.toggleAttribute('data-on');
+          // 关键词没变：优先走本地缓存秒出，不重新请求
+          if (currentQuery && !tryInstantSwitch()) doSearch(currentQuery, 1);
         });
         chipsEl.appendChild(el);
       }
@@ -997,6 +1048,11 @@
       const sources = getSelectedSources();
       if (sources.length === 0) {
         alert('请至少选择一个源');
+        return;
+      }
+
+      // 缓存命中：关键词+排序没变，直接渲染（首次搜索无缓存，走正常请求）
+      if (page === 1 && tryInstantSearch(query)) {
         return;
       }
 
@@ -1035,6 +1091,9 @@
 
         const data = await res.json();
         renderResults(data, query, page);
+
+        // 后台无感预取「全部源」，为切换源秒出做准备（不阻塞当前显示）
+        if (page === 1) prefetchAllSources(query);
 
       } catch (err) {
         console.error('搜索失败:', err);
@@ -1208,6 +1267,9 @@
           doSearch(currentQuery, 1);
         });
       });
+
+      // 之前设过种子过滤条件 → 新渲染的结果也自动应用（切源秒出后过滤不失效）
+      if (currentMinSeed > 0) applySeedFilter();
 
       const prevBtn = document.getElementById('prevBtn');
       const nextBtn = document.getElementById('nextBtn');
