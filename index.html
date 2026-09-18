@@ -774,7 +774,7 @@
     const SOURCES = [
       { id: '0magnet',   label: 'ØMagnet' },
       { id: 'xiaocao',   label: '小草磁力' },
-      { id: 'cilibaike', label: '磁力百科' },      
+      { id: 'cilibaike', label: '磁力百科' },
       { id: 'yuhuage',   label: '雨花阁' },
       { id: 'hufeng',    label: '虎风' },
       { id: 'cilimao', label: '磁力猫' },
@@ -1014,7 +1014,14 @@
           }
           el.toggleAttribute('data-on');
           // 关键词没变：优先走本地缓存秒出，不重新请求
-          if (currentQuery && !tryInstantSwitch()) doSearch(currentQuery, 1);
+          if (currentQuery) {
+            const srcs = getSelectedSources();
+            if (srcs.length === 0) {
+              showEmptySourceHint();   // 全部取消：温和提示，不弹窗
+            } else if (!tryInstantSwitch()) {
+              doSearch(currentQuery, 1);
+            }
+          }
         });
         chipsEl.appendChild(el);
       }
@@ -1023,6 +1030,23 @@
     function getSelectedSources() {
       return SOURCES.filter(s => selectedSources.has(s.id)).map(s => s.id);
     }
+
+    // 全部源被取消时：结果区显示温和提示（不弹窗）
+    function showEmptySourceHint() {
+      header.classList.add('compact');
+      hotSearches.style.display = 'none';
+      resultArea.innerHTML = `
+        <div class="result-bar">
+          <span>未勾选任何源</span>
+        </div>
+        <div class="empty-state">
+          <div class="icon">🍃</div>
+          <div class="title">请至少勾选一个源</div>
+          <div class="desc">在上方勾选想搜索的源即可继续</div>
+        </div>
+      `;
+    }
+
 
     loadQbConfig();
     buildChips();
@@ -1047,7 +1071,7 @@
 
       const sources = getSelectedSources();
       if (sources.length === 0) {
-        alert('请至少选择一个源');
+        showEmptySourceHint();
         return;
       }
 
