@@ -525,6 +525,57 @@ def extract_taocili_domains():
     return ok
 
 
+# ========== TPB（apibay 官方 API） ==========
+def extract_tpb_domains():
+    """TPB：apibay.org 官方 API 探测（返回含 info_hash 的真实记录即可用）。"""
+    try:
+        text = fetch_text('https://apibay.org/q.php?q=avengers&cat=0', timeout=12)
+        arr = json.loads(text)
+        if isinstance(arr, list) and any(
+            isinstance(x, dict) and x.get('id') != '0' and x.get('info_hash') for x in arr
+        ):
+            print('[TPB] apibay.org 可用')
+            return ['https://apibay.org']
+    except Exception as e:
+        print(f'[TPB] 探测失败: {e}')
+    return []
+
+
+# ========== therarbg（RARBG 延续，JSON API） ==========
+def extract_therarbg_domains():
+    """therarbg：JSON API 探测（keywords 多词必须 %20 编码，用 + 会返回 0 条）。"""
+    try:
+        text = fetch_text('https://therarbg.com/get-posts/keywords:avengers/?format=json', timeout=12)
+        j = json.loads(text)
+        if isinstance(j, dict) and isinstance(j.get('results'), list) and len(j['results']) > 0:
+            print('[therarbg] therarbg.com 可用')
+            return ['https://therarbg.com']
+    except Exception as e:
+        print(f'[therarbg] 探测失败: {e}')
+    return []
+
+
+# ========== EZTV（镜像 API 探测） ==========
+EZTV_CANDIDATES = ['https://eztvx.to', 'https://eztv.re', 'https://eztv.tf']
+def extract_eztv_domains():
+    """EZTV：镜像 API 按 imdb 探测（可用最多收录 2 个）。"""
+    ok = []
+    for d in EZTV_CANDIDATES:
+        try:
+            text = fetch_text(f'{d}/api/get-torrents?imdb_id=tt0108778&limit=1&page=1', timeout=12)
+            j = json.loads(text)
+            if isinstance(j, dict) and isinstance(j.get('torrents'), list) and len(j['torrents']) > 0:
+                ok.append(d)
+                print(f'[EZTV] {d} 可用')
+                if len(ok) >= 2:
+                    break
+            else:
+                print(f'[EZTV] {d} 无结果，跳过')
+        except Exception as e:
+            print(f'[EZTV] {d} 探测失败: {e}')
+    return ok
+
+
 def load_previous_domains():
     if not OUTPUT_FILE.exists():
         return {}
@@ -551,6 +602,9 @@ def main():
         'cilimao': [],
         'ciliso': [],
         'taocili': [],
+        'tpb': [],
+        'therarbg': [],
+        'eztv': [],
     }
 
     result['xiaocao'] = extract_xiaocao_domains()
@@ -594,6 +648,33 @@ def main():
 
     result['ciliso'] = get_ciliso_domains()
 
+    tpb_domains = extract_tpb_domains()
+    if tpb_domains:
+        result['tpb'] = tpb_domains
+    else:
+        fallback = previous.get('tpb', [])
+        if fallback:
+            print(f'[TPB] 提取为空，保留上次的 {len(fallback)} 个域名')
+        result['tpb'] = fallback
+
+    therarbg_domains = extract_therarbg_domains()
+    if therarbg_domains:
+        result['therarbg'] = therarbg_domains
+    else:
+        fallback = previous.get('therarbg', [])
+        if fallback:
+            print(f'[therarbg] 提取为空，保留上次的 {len(fallback)} 个域名')
+        result['therarbg'] = fallback
+
+    eztv_domains = extract_eztv_domains()
+    if eztv_domains:
+        result['eztv'] = eztv_domains
+    else:
+        fallback = previous.get('eztv', [])
+        if fallback:
+            print(f'[EZTV] 提取为空，保留上次的 {len(fallback)} 个域名')
+        result['eztv'] = fallback
+
     taocili_domains = extract_taocili_domains()
     if taocili_domains:
         result['taocili'] = taocili_domains
@@ -618,6 +699,9 @@ def main():
     print(f'  磁力猫: {len(result["cilimao"])} 个')
     print(f'  磁力搜: {len(result["ciliso"])} 个')
     print(f'  淘磁力: {len(result["taocili"])} 个')
+    print(f'  TPB: {len(result["tpb"])} 个')
+    print(f'  therarbg: {len(result["therarbg"])} 个')
+    print(f'  EZTV: {len(result["eztv"])} 个')
     if result['cctv10']:
         print('  U3C3 域名:')
         for d in result['cctv10']:
@@ -633,6 +717,18 @@ def main():
     if result['taocili']:
         print('  淘磁力域名:')
         for d in result['taocili']:
+            print(f'    - {d}')
+    if result['tpb']:
+        print('  TPB域名:')
+        for d in result['tpb']:
+            print(f'    - {d}')
+    if result['therarbg']:
+        print('  therarbg域名:')
+        for d in result['therarbg']:
+            print(f'    - {d}')
+    if result['eztv']:
+        print('  EZTV域名:')
+        for d in result['eztv']:
             print(f'    - {d}')
 
 
