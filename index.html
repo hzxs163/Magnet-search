@@ -774,15 +774,15 @@
     const SOURCES = [
       { id: '0magnet',   label: 'ØMagnet' },
       { id: 'xiaocao',   label: '小草磁力' },
-      { id: 'juniorter', label: 'Juniorter' },
       { id: 'cilibaike', label: '磁力百科' },
-      { id: 'knaben',    label: 'Knaben' },
       { id: 'yuhuage',   label: '雨花阁' },
       { id: 'hufeng',    label: '虎风' },
-      { id: 'cctv10',    label: 'U3C3' },
       { id: 'cilimao', label: '磁力猫' },
       { id: 'ciliso', label: '磁力搜' },
       { id: 'taocili', label: '淘磁力' },
+      { id: 'cctv10',    label: 'U3C3' },
+      { id: 'knaben',    label: 'Knaben' },
+      { id: 'juniorter', label: 'Juniorter' },
       { id: 'tpb',      label: 'TPB' },
       { id: 'therarbg', label: 'RARBG' },
       { id: 'eztv',     label: 'EZTV' },
@@ -1235,11 +1235,7 @@
                 ${seedBadge(item)}
                 <span>${size}</span>
                 ${date ? `<span class="dot">·</span><span>${date}</span>` : ''}
-                ${source ? (
-                  item.detailUrl && /^https?:\/\//.test(item.detailUrl)
-                    ? `<a class="result-source" href="${escapeHtml(item.detailUrl.split('/').slice(0, 3).join('/'))}" target="_blank" rel="noopener" title="打开源站点：${escapeHtml(source)}（左键点击 / 右键菜单打开）">${escapeHtml(source)}</a>`
-                    : `<span class="result-source">${escapeHtml(source)}</span>`
-                ) : ''}
+                ${source ? `<span class="result-source">${escapeHtml(source)}</span>` : ''}
               </div>
             </div>
             ${magnet ? `
