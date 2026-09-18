@@ -116,6 +116,7 @@ export async function onRequest(context) {
       results: deduped,
       total: deduped.length,
       timing,
+      sourceSites: buildSourceSites(),
       debug: {
         sources: sources,
         page: page,
@@ -130,6 +131,21 @@ export async function onRequest(context) {
     console.error('Search error:', err);
     return jsonResponse({ error: 'Search failed', detail: String(err), cctv10Raw: CCTV10_DEBUG, cilimaoRaw: CILIMAO_DEBUG }, 502);
   }
+}
+
+// 各源站点主页（供前端"源标签右键跳转源站"用）
+function buildSourceSites() {
+  const cfg = getDomainsConfig();
+  const sites = {};
+  for (const key of Object.keys(cfg)) {
+    const arr = cfg[key];
+    if (Array.isArray(arr) && arr.length) sites[key] = arr[0];
+  }
+  // 硬编码源（不在 domains.json 里）
+  sites['0magnet'] = 'https://0magnet.com';
+  sites['juniorter'] = 'https://torrent.juniorter.in';
+  sites['knaben'] = 'https://knaben.xyz';
+  return sites;
 }
 
 function simplifyMagnet(magnet) {
