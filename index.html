@@ -335,7 +335,30 @@
       letter-spacing: .3px;
     }
 
-    .magnet-row {
+    
+    .seed-badge {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 10px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-right: 4px;
+      white-space: nowrap;
+    }
+    .seed-badge.ok   { background: #dcfce7; color: #166534; }
+    .seed-badge.warn { background: #fef3c7; color: #92400e; }
+    .seed-badge.dead { background: #fee2e2; color: #991b1b; }
+    .seed-badge.na   { background: #f3f4f6; color: #6b7280; }
+    .seed-filter {
+      font-size: 12px;
+      padding: 2px 6px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      background: #fff;
+      color: #333;
+      margin-left: 8px;
+    }
+.magnet-row {
       display: flex;
       align-items: center;
       gap: 6px;
@@ -751,15 +774,18 @@
     const SOURCES = [
       { id: '0magnet',   label: 'ØMagnet' },
       { id: 'xiaocao',   label: '小草磁力' },
-      { id: 'juniorter', label: 'Juniorter' },
-      { id: 'cilibaike', label: '磁力百科' },
-      { id: 'knaben',    label: 'Knaben' },
+      { id: 'cilibaike', label: '磁力百科' },      
       { id: 'yuhuage',   label: '雨花阁' },
-      { id: 'hufeng',    label: '虎风' },
-      { id: 'cctv10',    label: 'U3C3' },
+      { id: 'hufeng',    label: '虎风' },      
       { id: 'cilimao', label: '磁力猫' },
       { id: 'ciliso', label: '磁力搜' },
       { id: 'taocili', label: '淘磁力' },
+      { id: 'cctv10',    label: 'U3C3' },
+      { id: 'knaben',    label: 'Knaben' },
+      { id: 'juniorter', label: 'Juniorter' },
+      { id: 'tpb',      label: 'TPB' },
+      { id: 'therarbg', label: 'RARBG' },
+      { id: 'eztv',     label: 'EZTV' },
     ];
 
     const DEFAULT_SOURCES = ['0magnet'];
@@ -1020,6 +1046,34 @@
       }
     }
 
+    function seedNum(item) {
+      const raw = item ? item.seeds : undefined;
+      if (raw === undefined || raw === null || raw === '') return -1; // 无种子数据（中文源等）
+      const n = parseInt(raw, 10);
+      return Number.isFinite(n) ? n : -1;
+    }
+
+    function seedBadge(item) {
+      const n = seedNum(item);
+      const cls = n >= 5 ? 'ok' : (n >= 1 ? 'warn' : (n === 0 ? 'dead' : 'na'));
+      const label = n < 0 ? '种子未知' : (n > 0 ? n + ' 种子' : '0 种子');
+      return `<span class="seed-badge ${cls}" data-seeds="${n}">${label}</span>`;
+    }
+
+    let currentMinSeed = 0;
+    const applySeedFilter = () => {
+      const min = currentMinSeed;
+      let visible = 0;
+      document.querySelectorAll('.result-card').forEach((card) => {
+        const n = parseInt(card.dataset.seeds, 10);
+        const show = (Number.isFinite(n) && n < 0) ? true : n >= min; // 无数据不误伤
+        card.style.display = show ? '' : 'none';
+        if (show) visible++;
+      });
+      const countEl = document.getElementById('streamCount');
+      if (countEl) countEl.innerHTML = `本页 ${visible} 条结果${min > 0 ? '（已过滤 0 种子）' : ''}`;
+    };
+
     function renderResults(data, query, page) {
       const results = data.results || [];
       const total = data.total || results.length;
@@ -1038,8 +1092,13 @@
 
       let html = `
         <div class="result-bar">
-          <span>本页 ${total} 条结果 <span class="timing">— ${timing} ms</span></span>
+          <span id="streamCount">本页 ${total} 条结果 <span class="timing">— ${timing} ms</span></span>
           <div class="sort-options">
+            <select id="minSeedFilter" class="seed-filter" title="按种子数过滤（0 种子=基本下不动）">
+              <option value="0">全部种子</option>
+              <option value="1">≥1 种子</option>
+              <option value="5">≥5 种子</option>
+            </select>
             <a href="javascript:void(0)" data-sort="relevance" class="${currentSort === 'relevance' ? 'active' : ''}">相关</a>
             <a href="javascript:void(0)" data-sort="newest" class="${currentSort === 'newest' ? 'active' : ''}">最新</a>
           </div>
@@ -1055,12 +1114,13 @@
         const source = item.source || '';
 
         html += `
-          <div class="result-card">
+          <div class="result-card" data-seeds="${seedNum(item)}">
             <a class="result-title" href="${item.detailUrl || '#'}" target="_blank" rel="noopener">
               ${name}
             </a>
             <div class="result-meta">
               <div class="result-meta-left">
+                ${seedBadge(item)}
                 <span>${size}</span>
                 ${date ? `<span class="dot">·</span><span>${date}</span>` : ''}
                 ${source ? `<span class="result-source">${escapeHtml(source)}</span>` : ''}
@@ -1094,6 +1154,15 @@
       `;
 
       resultArea.innerHTML = html;
+
+      const filterSel = document.getElementById('minSeedFilter');
+      if (filterSel) {
+        filterSel.value = String(currentMinSeed);
+        filterSel.addEventListener('change', () => {
+          currentMinSeed = parseInt(filterSel.value, 10) || 0;
+          applySeedFilter();
+        });
+      }
 
       resultArea.querySelectorAll('.magnet-row').forEach(row => {
         const link = row.querySelector('.magnet-link');
