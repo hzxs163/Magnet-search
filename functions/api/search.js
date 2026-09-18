@@ -907,13 +907,19 @@ async function fetchFromTpb(query, page, sort, waitUntil) {
   for (const domain of domains) {
     try {
       const url = `${domain}/q.php?q=${encodeURIComponent(query)}&cat=0`;
-      const text = await fetchWithCache(url, 900, waitUntil);
+      const text = await fetchWithCache(url, 180, waitUntil);
       let arr;
       try { arr = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
       if (!Array.isArray(arr)) continue;
       // apibay 无结果时返回一条 id=0 的占位记录，要滤掉
-      return arr
-        .filter((r) => r && r.id !== '0' && r.info_hash && !/^0+$/.test(r.info_hash))
+      const real = arr.filter((r) => r && r.id !== '0' && r.info_hash && !/^0+$/.test(r.info_hash));
+      if (real.length === 0) {
+        // 占位空结果（id=0）说明这词当前确实没货：删掉刚写入的缓存，避免"空结果被缓存几分钟"
+        // 让下次搜索能重新请求，而不是被缓存卡死显示 0 条
+        try { await caches.default.delete(new Request(url, { method: 'GET' })); } catch (e) {}
+        return [];
+      }
+      return real
         .map((r) => ({
           name: r.name || '',
           size: formatBytes(Number(r.size) || 0),
