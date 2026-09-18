@@ -773,16 +773,16 @@
     // ---------- 源定义 ----------
     const SOURCES = [
       { id: '0magnet',   label: 'ØMagnet' },
-      { id: 'xiaocao',   label: '小草磁力' },      
-      { id: 'cilibaike', label: '磁力百科' },      
+      { id: 'xiaocao',   label: '小草磁力' },
+      { id: 'juniorter', label: 'Juniorter' },
+      { id: 'cilibaike', label: '磁力百科' },
+      { id: 'knaben',    label: 'Knaben' },
       { id: 'yuhuage',   label: '雨花阁' },
-      { id: 'hufeng',    label: '虎风' },      
+      { id: 'hufeng',    label: '虎风' },
+      { id: 'cctv10',    label: 'U3C3' },
       { id: 'cilimao', label: '磁力猫' },
       { id: 'ciliso', label: '磁力搜' },
       { id: 'taocili', label: '淘磁力' },
-      { id: 'cctv10',    label: 'U3C3' },
-      { id: 'knaben',    label: 'Knaben' },
-      { id: 'juniorter', label: 'Juniorter' },   
       { id: 'tpb',      label: 'TPB' },
       { id: 'therarbg', label: 'RARBG' },
       { id: 'eztv',     label: 'EZTV' },
@@ -792,6 +792,24 @@
 
     // ===== 结果缓存：切换源秒出 + 后台全源预取 =====
     const resultCache = new Map();          // key = `${query}||${sort}` -> { data(全源结果), ts }
+
+    // 各源站点主页：右键源标签跳转用；每次搜索响应会更新为最新域名
+    let sourceSites = {
+      '0magnet': 'https://0magnet.com',
+      'xiaocao': 'https://www.xccl260.xyz',
+      'juniorter': 'https://torrent.juniorter.in',
+      'cilibaike': 'https://thvj3342.8881067.xyz',
+      'knaben': 'https://knaben.xyz',
+      'yuhuage': 'https://www.yuhuage.fit',
+      'hufeng': 'https://xiudie.sbs',
+      'cctv10': 'https://u3c3u3c3.u3c3u3c3u3c3.com',
+      'cilimao': 'https://clm65.top',
+      'ciliso': 'https://dfib32o2.3030117.xyz',
+      'taocili': 'https://taocili9.shop',
+      'tpb': 'https://apibay.org',
+      'therarbg': 'https://therarbg.com',
+      'eztv': 'https://eztvx.to',
+    };
     const CACHE_TTL = 5 * 60 * 1000;        // 缓存 5 分钟
     const cacheKeyFor = (q, sort) => `${q}||${sort}`;
 
@@ -1006,6 +1024,14 @@
         el.dataset.id = s.id;
         if (selectedSources.has(s.id)) el.setAttribute('data-on', '');
         el.innerHTML = '<span class="dot"></span>' + s.label;
+        // 右键：跳转该源站点（不拦截，原右键菜单保留为浏览器默认）
+        el.addEventListener('contextmenu', (e) => {
+          const url = sourceSites[s.id];
+          if (url) {
+            e.preventDefault();
+            window.open(url, '_blank', 'noopener');
+          }
+        });
         el.addEventListener('click', () => {
           if (selectedSources.has(s.id)) {
             selectedSources.delete(s.id);
@@ -1158,6 +1184,9 @@
     };
 
     function renderResults(data, query, page) {
+      if (data.sourceSites && typeof data.sourceSites === 'object') {
+        sourceSites = { ...sourceSites, ...data.sourceSites };   // 域名配置更新后自动跟随
+      }
       const results = data.results || [];
       const total = data.total || results.length;
       const timing = data.timing || 0;
@@ -1206,7 +1235,11 @@
                 ${seedBadge(item)}
                 <span>${size}</span>
                 ${date ? `<span class="dot">·</span><span>${date}</span>` : ''}
-                ${source ? `<span class="result-source">${escapeHtml(source)}</span>` : ''}
+                ${source ? (
+                  item.detailUrl && /^https?:\/\//.test(item.detailUrl)
+                    ? `<a class="result-source" href="${escapeHtml(item.detailUrl.split('/').slice(0, 3).join('/'))}" target="_blank" rel="noopener" title="打开源站点：${escapeHtml(source)}（左键点击 / 右键菜单打开）">${escapeHtml(source)}</a>`
+                    : `<span class="result-source">${escapeHtml(source)}</span>`
+                ) : ''}
               </div>
             </div>
             ${magnet ? `
