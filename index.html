@@ -774,15 +774,15 @@
     const SOURCES = [
       { id: '0magnet',   label: 'ØMagnet' },
       { id: 'xiaocao',   label: '小草磁力' },
+      { id: 'juniorter', label: 'Juniorter' },
       { id: 'cilibaike', label: '磁力百科' },
+      { id: 'knaben',    label: 'Knaben' },
       { id: 'yuhuage',   label: '雨花阁' },
       { id: 'hufeng',    label: '虎风' },
+      { id: 'cctv10',    label: 'U3C3' },
       { id: 'cilimao', label: '磁力猫' },
       { id: 'ciliso', label: '磁力搜' },
       { id: 'taocili', label: '淘磁力' },
-      { id: 'cctv10',    label: 'U3C3' },
-      { id: 'knaben',    label: 'Knaben' },
-      { id: 'juniorter', label: 'Juniorter' },
       { id: 'tpb',      label: 'TPB' },
       { id: 'therarbg', label: 'RARBG' },
       { id: 'eztv',     label: 'EZTV' },
@@ -822,9 +822,11 @@
 
     // 后台预取：把「全部源」的搜索结果填进缓存（不阻塞 UI、不显示 loading）
     async function prefetchAllSources(query) {
+      const ck = cacheKeyFor(query, currentSort);
+      if (resultCache.has(ck)) return;               // 已有缓存，不重复打
+      if (prefetchingKey === ck) return;             // 正在预取同一个词，不并发
+      prefetchingKey = ck;
       try {
-        const ck = cacheKeyFor(query, currentSort);
-        if (resultCache.has(ck)) return;               // 已有缓存，不重复打
         const allSources = SOURCES.map((s) => s.id);
         const url = `${API_BASE}/api/search?q=${encodeURIComponent(query)}&page=1&sort=${currentSort}&sources=${encodeURIComponent(allSources.join(','))}`;
         const res = await fetch(url);
@@ -834,6 +836,8 @@
         console.log(`[预取] ${query} 全源 ${data.total || 0} 条已缓存`);
       } catch (e) {
         /* 预取失败静默忽略，不影响用户操作 */
+      } finally {
+        if (prefetchingKey === ck) prefetchingKey = null;
       }
     }
 
@@ -1093,7 +1097,11 @@
     });
 
     async function doSearch(query, page = 1) {
-      if (isLoading) return;
+      if (isLoading) {
+        // 正在搜索中：把最新请求排队，完成后自动执行（连续切源不被吞）
+        pendingSearch = { query, page };
+        return;
+      }
 
       const sources = getSelectedSources();
       if (sources.length === 0) {
@@ -1152,6 +1160,11 @@
         isLoading = false;
         searchBtn.disabled = false;
         searchBtn.textContent = '搜索';
+        if (pendingSearch) {
+          const p = pendingSearch;
+          pendingSearch = null;
+          doSearch(p.query, p.page);
+        }
       }
     }
 
@@ -1169,6 +1182,8 @@
       return `<span class="seed-badge ${cls}" data-seeds="${n}">${label}</span>`;
     }
 
+    let pendingSearch = null;          // 切源请求被 isLoading 阻塞时排队，完成后立即执行
+    let prefetchingKey = null;         // 预取互斥：同一关键词只允许一个全源预取在跑
     let currentMinSeed = 0;
     const applySeedFilter = () => {
       const min = currentMinSeed;
