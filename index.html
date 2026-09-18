@@ -820,6 +820,55 @@
       return results.filter((it) => set.has(it.source));
     }
 
+    // 真实请求的结果合并回缓存：替换缓存中"勾选源"的旧条目（修复全源去重导致的源缺失）
+    function mergeIntoCache(query, data, sources) {
+      const ck = cacheKeyFor(query, currentSort);
+      const prev = resultCache.get(ck);
+      if (!prev) return;                       // 只有全源预取缓存存在时才合并修正（避免污染半源缓存）
+      const srcSet = new Set(sources);
+      // 同源替换：勾选源的旧条目用单源直查的完整结果覆盖（不去重——
+      // 聚合站结果 magnet 可能与其它站相同，去重会误删该源完整结果）
+      const others = prev.data.results.filter((it) => !srcSet.has(it.source));
+      const merged = [...others, ...(data.results || [])];
+      resultCache.set(ck, { data: { ...prev.data, results: merged, total: merged.length }, ts: Date.now() });
+    }
+
+    let realRefreshing = false;          // 真实修正防重入
+    // 秒出后修正：勾选源里"预取时有结果但缓存缺失/不全"（如全源去重把聚合站结果丢掉）→ 后台真实请求补齐
+    async function refreshFromRealIfNeeded(query) {
+      if (isLoading || realRefreshing) return;
+      const ck = cacheKeyFor(query, currentSort);
+      const cached = resultCache.get(ck);
+      if (!cached) return;
+      const sources = getSelectedSources();
+      if (sources.length === 0) return;
+      const dbg = cached.data.debug || {};
+      const filtered = filterBySources(cached.data.results, sources);
+      const needReal = sources.some((src) => {
+        const cnt = Number(dbg[`${src}Count`]) || 0;
+        if (cnt <= 0) return false;
+        return filtered.filter((it) => it.source === src).length < cnt;
+      });
+      if (!needReal) return;
+      realRefreshing = true;
+      const srcsSnapshot = sources.join(',');
+      try {
+        const url = `${API_BASE}/api/search?q=${encodeURIComponent(query)}&page=1&sort=${currentSort}&sources=${encodeURIComponent(sources.join(','))}`;
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const data = await res.json();
+        mergeIntoCache(query, data, sources);
+        // 用户没切走才渲染（切走了只更新缓存，不覆盖用户正在看的源）
+        if (getSelectedSources().join(',') === srcsSnapshot) {
+          renderResults(data, query, 1);
+        }
+      } catch (e) {
+        /* 修正失败静默，不影响用户操作 */
+      } finally {
+        realRefreshing = false;
+      }
+    }
+
     // 后台预取：把「全部源」的搜索结果填进缓存（不阻塞 UI、不显示 loading）
     async function prefetchAllSources(query) {
       const ck = cacheKeyFor(query, currentSort);
@@ -855,6 +904,7 @@
       hotSearches.style.display = 'none';
       const filtered = filterBySources(cached.data.results, sources);
       renderResults({ ...cached.data, results: filtered, total: filtered.length }, query, 1);
+      refreshFromRealIfNeeded(query);     // 后台修正：预取有结果但缓存缺失的源（如聚合站被去重）
       return true;
     }
     // 兼容调用名
@@ -1149,6 +1199,9 @@
 
         const data = await res.json();
         renderResults(data, query, page);
+
+        // 真实结果合并回缓存：替换勾选源的旧缓存条目（后续切源秒出更准确）
+        if (page === 1) mergeIntoCache(query, data, sources);
 
         // 后台无感预取「全部源」，为切换源秒出做准备（不阻塞当前显示）
         if (page === 1) prefetchAllSources(query);
