@@ -23,7 +23,7 @@ export async function onRequest(context) {
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
 
-  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili';
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,therarbg,eztv';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
 
   if (!query) {
@@ -70,6 +70,15 @@ export async function onRequest(context) {
     }
     if (sources.includes('taocili')) {
       tasks.push({ name: 'taocili', promise: fetchFromTaocili(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('tpb')) {
+      tasks.push({ name: 'tpb', promise: fetchFromTpb(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('therarbg')) {
+      tasks.push({ name: 'therarbg', promise: fetchFromTherarbg(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('eztv')) {
+      tasks.push({ name: 'eztv', promise: fetchFromEztvSmart(query, page, sort, waitUntil) });
     }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
@@ -150,6 +159,9 @@ function getDomainsConfig() {
     cilimao: Array.isArray(data.cilimao) ? data.cilimao : [],
     ciliso: Array.isArray(data.ciliso) ? data.ciliso : [],
     taocili: Array.isArray(data.taocili) ? data.taocili : [],
+    tpb: Array.isArray(data.tpb) ? data.tpb : [],
+    therarbg: Array.isArray(data.therarbg) ? data.therarbg : [],
+    eztv: Array.isArray(data.eztv) ? data.eztv : [],
   };
 }
 
@@ -880,6 +892,131 @@ async function fetchWithCache(url, ttl, waitUntil) {
   }
 
   return await response.text();
+}
+
+// ========== TPB（apibay 官方 API，一次返回全部命中） ==========
+const TPB_DOMAINS = ['https://apibay.org'];
+function isoFromUnix(sec) {
+  const n = Number(sec);
+  return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toISOString().slice(0, 10) : '';
+}
+
+async function fetchFromTpb(query, page, sort, waitUntil) {
+  const cfg = getDomainsConfig().tpb;
+  const domains = (cfg && cfg.length) ? cfg : TPB_DOMAINS;
+  for (const domain of domains) {
+    try {
+      const url = `${domain}/q.php?q=${encodeURIComponent(query)}&cat=0`;
+      const text = await fetchWithCache(url, 900, waitUntil);
+      let arr;
+      try { arr = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
+      if (!Array.isArray(arr)) continue;
+      // apibay 无结果时返回一条 id=0 的占位记录，要滤掉
+      return arr
+        .filter((r) => r && r.id !== '0' && r.info_hash && !/^0+$/.test(r.info_hash))
+        .map((r) => ({
+          name: r.name || '',
+          size: formatBytes(Number(r.size) || 0),
+          date: isoFromUnix(r.added),
+          seeds: Number(r.seeders) || 0,
+          peers: Number(r.leechers) || 0,
+          magnet: `magnet:?xt=urn:btih:${String(r.info_hash).toLowerCase()}`,
+          detailUrl: r.id ? `https://thepiratebay.org/description.php?id=${r.id}` : '',
+          source: 'tpb',
+          imdb: r.imdb || '',
+        }))
+        .filter((it) => it.name && it.magnet);
+    } catch (err) {
+      console.error(`TPB domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+// ========== therarbg（RARBG 延续，JSON API；多词必须 %20 编码，用 + 会返回 0 条） ==========
+const THERARBG_DOMAINS = ['https://therarbg.com'];
+async function fetchFromTherarbg(query, page, sort, waitUntil) {
+  const cfg = getDomainsConfig().therarbg;
+  const domains = (cfg && cfg.length) ? cfg : THERARBG_DOMAINS;
+  for (const domain of domains) {
+    try {
+      const kw = encodeURIComponent(query).replace(/\+/g, '%20');
+      const url = `${domain}/get-posts/keywords:${kw}/?format=json`;
+      const text = await fetchWithCache(url, 900, waitUntil);
+      let j;
+      try { j = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
+      if (!j || !Array.isArray(j.results)) continue;
+      return j.results
+        .map((r) => ({
+          name: r.n || '',
+          size: formatBytes(Number(r.s) || 0),
+          date: isoFromUnix(r.a),
+          seeds: Number(r.se) || 0,
+          peers: Number(r.le) || 0,
+          magnet: r.h ? `magnet:?xt=urn:btih:${String(r.h).toLowerCase()}` : '',
+          detailUrl: r.pk ? `${domain}/post-detail/${r.pk}/` : '',
+          source: 'therarbg',
+          imdb: r.i || '',
+        }))
+        .filter((it) => it.name && it.magnet);
+    } catch (err) {
+      console.error(`therarbg domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+// ========== EZTV（镜像 API，只能按 imdb_id 查询） ==========
+const EZTV_DOMAINS = ['https://eztvx.to', 'https://eztv.re', 'https://eztv.tf'];
+async function fetchFromEztv(imdbId, page, sort, waitUntil) {
+  const id = String(imdbId || '').replace(/^tt/i, '');
+  if (!/^\d{5,}$/.test(id)) return [];
+  const cfg = getDomainsConfig().eztv;
+  const domains = (cfg && cfg.length) ? cfg : EZTV_DOMAINS;
+  for (const domain of domains) {
+    try {
+      const url = `${domain}/api/get-torrents?imdb_id=${id}&limit=100&page=${Math.max(1, page || 1)}`;
+      const text = await fetchWithCache(url, 3600, waitUntil);
+      let j;
+      try { j = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
+      if (!j || !Array.isArray(j.torrents)) continue;
+      return j.torrents
+        .map((t) => ({
+          name: t.title || t.filename || '',
+          size: formatBytes(Number(t.size_bytes) || 0),
+          date: isoFromUnix(t.date_released_unix),
+          seeds: Number(t.seeds) || 0,
+          peers: Number(t.peers) || 0,
+          magnet: t.magnet_url ? simplifyMagnet(t.magnet_url) : '',
+          detailUrl: t.episode_url || '',
+          source: 'eztv',
+        }))
+        .filter((it) => it.name && it.magnet);
+    } catch (err) {
+      console.error(`EZTV domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+// EZTV 只能按 IMDb 编号查：先从 TPB/RARBG 结果里收集 imdb 字段，取出现最多的编号去查
+async function fetchFromEztvSmart(query, page, sort, waitUntil) {
+  const counts = new Map();
+  for (const fn of [fetchFromTpb, fetchFromTherarbg]) {
+    try {
+      const items = await fn(query, page, sort, waitUntil);
+      for (const it of items) {
+        const id = String(it.imdb || '').replace(/^tt/i, '');
+        if (/^\d{5,}$/.test(id)) counts.set(id, (counts.get(id) || 0) + 1);
+      }
+    } catch (e) { /* 单个源失败不影响推断 */ }
+  }
+  if (!counts.size) return [];
+  let best = '', bestN = 0;
+  for (const [id, n] of counts) {
+    if (n > bestN) { best = id; bestN = n; }
+  }
+  return fetchFromEztv(best, page, sort, waitUntil);
 }
 
 function jsonResponse(data, status = 200) {
