@@ -53,7 +53,7 @@ BtFox 和种子吧的域名在 `domains.json` 里手动维护，定时任务会�
 ## API
 
 ```
-GET /api/search?q=关键词&page=1&sort=time&sources=btfox,zhongziba
+GET /api/search?q=jerry&page=1&sort=time&sources=knaben,therarbg
 ```
 
 参数：
