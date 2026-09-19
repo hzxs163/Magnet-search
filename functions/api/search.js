@@ -153,7 +153,7 @@ function buildSourceSites() {
   // 硬编码源（不在 domains.json 里）
   sites['0magnet'] = 'https://0magnet.com';
   sites['juniorter'] = 'https://torrent.juniorter.in';
-  sites['knaben'] = 'https://knaben.xyz';
+  sites['knaben'] = 'https://knaben.org';
   return sites;
 }
 
