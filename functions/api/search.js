@@ -91,9 +91,9 @@ export async function onRequest(context) {
     }
     if (sources.includes('cilichi')) {
       tasks.push({ name: 'cilichi', promise: fetchFromCilichi(query, page, sort, waitUntil) });
+    }
     if (sources.includes('yts')) {
       tasks.push({ name: 'yts', promise: fetchFromYts(query, page, sort, waitUntil) });
-    }
     }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
