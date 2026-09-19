@@ -1,13 +1,10 @@
 // Pages Functions - /api/search
 
-// 域名配置实时读取在线配置（远程 > 本地缓存 > 内置 domains.json），更新后无需重启
-import { getDomains } from './domain_config.js';
-// 磁力百科/磁力搜：搜索时按当前 30 分钟时隙实时算子域名（FNV-1a+xorshift），永远最新
-import { getCilisoDomains, getCilibaikeDomains } from './dyn_domains.js';
+import domainsConfig from '../../domains.json';
 
 const JUNIORTER_API = 'https://torrent.juniorter.in/api/search-stream';
 const JUNIORTER_PROVIDERS = [
-  'yts', 'eztv', 'torrentclaw', 'piratebay', 'knaben', '1337x', 'limetorrents',
+  'yts', 'eztv', 'torrentclaw', 'piratebay', 'knaben', 'limetorrents',
   'torrentfunk', 'torrentdownloads', 'torlock', 'yourbittorrent', 'magnetz',
   'bitsearch', 'solidtorrents', 'torrentscsv', 'therarbg', 'animetosho', 'nyaa',
   'mikan', 'tokyotosho', 'dmhy', 'acgrip', 'subsplease', 'rutor',
@@ -19,166 +16,139 @@ const KNABEN_API = 'https://api.knaben.org/v1';
 let CCTV10_DEBUG = {};
 let CILIMAO_DEBUG = {};
 
-const ALL_SOURCE_IDS = ['0magnet','xiaocao','juniorter','cilibaike','knaben','yuhuage','hufeng','cctv10','cilimao','ciliso','x1337x','taocili','tpb','piratebay','therarbg','eztv','btfox','zhongziba','cilichi','bitsearch'];
-// 单个“搜索源”的整体硬超时：到点就放弃该源，其它源与整页都不会被它拖住
-const PER_SOURCE_TIMEOUT_MS = 12000;
-
-function buildTasks(query, page, sort, waitUntil) {
-  const tasks = [];
-  const push = (name, promise, timeoutMs) => {
-    // 防 unhandled rejection 崩进程：未选中/失败的任务 rejection 也必须被消费
-    promise.catch(() => {});
-    tasks.push({ name, promise, timeoutMs });
-  };
-  if (ALL_SOURCE_IDS.includes('0magnet'))    push('0magnet', fetchFrom0Magnet(query, sort, page, waitUntil));
-  if (ALL_SOURCE_IDS.includes('xiaocao'))    push('xiaocao', fetchFromXiaocao(query, page, sort, waitUntil));
-  if (ALL_SOURCE_IDS.includes('juniorter'))  push('juniorter', fetchFromJuniorter(query, page, sort, waitUntil));
-  if (ALL_SOURCE_IDS.includes('cilibaike'))  push('cilibaike', fetchFromCilibaike(query, page, sort, waitUntil, 'cilibaike'));
-  if (ALL_SOURCE_IDS.includes('knaben'))     push('knaben', fetchFromKnaben(query, page, sort, waitUntil));
-  if (ALL_SOURCE_IDS.includes('yuhuage'))    push('yuhuage', fetchFromYuhuage(query, page, sort, waitUntil));
-  if (ALL_SOURCE_IDS.includes('hufeng'))     push('hufeng', fetchFromHufeng(query, page, sort, waitUntil));
-  if (ALL_SOURCE_IDS.includes('cctv10'))     push('cctv10', fetchFromCctv10(query, page, sort, waitUntil));
-  if (ALL_SOURCE_IDS.includes('cilimao'))    push('cilimao', fetchFromCilimao(query, page, sort, waitUntil));
-  if (ALL_SOURCE_IDS.includes('ciliso'))     push('ciliso', fetchFromCilibaike(query, page, sort, waitUntil, 'ciliso'));
-  if (ALL_SOURCE_IDS.includes('x1337x'))     push('x1337x', fetchFromX1337x(query, page, sort, waitUntil), 25000); // 需翻页找精确匹配，放宽到 25s
-  if (ALL_SOURCE_IDS.includes('taocili'))    push('taocili', fetchFromTaocili(query, page, sort, waitUntil));
-  if (ALL_SOURCE_IDS.includes('tpb'))      push('tpb', fetchFromTpb(query, page, sort, waitUntil));
-  if (ALL_SOURCE_IDS.includes('piratebay')) push('piratebay', fetchFromPiratebay(query, page, sort, waitUntil));
-  if (ALL_SOURCE_IDS.includes('therarbg')) push('therarbg', fetchFromTherarbg(query, page, sort, waitUntil));
-  if (ALL_SOURCE_IDS.includes('eztv'))     push('eztv', fetchFromEztvSmart(query, page, sort, waitUntil));
-  if (ALL_SOURCE_IDS.includes('btfox'))    push('btfox', fetchFromBtfox(query, page, sort, waitUntil));
-  if (ALL_SOURCE_IDS.includes('zhongziba')) push('zhongziba', fetchFromZhongziba(query, page, sort, waitUntil));
-  if (ALL_SOURCE_IDS.includes('cilichi'))   push('cilichi', fetchFromCilichi(query, page, sort, waitUntil));
-  if (ALL_SOURCE_IDS.includes('bitsearch')) push('bitsearch', fetchFromBitsearch(query, page, sort, waitUntil));
-  return tasks;
-}
-
-// 只跑指定源（按用户勾选），保持与历史一致的源顺序
-function selectTasks(allTasks, sources) {
-  const want = new Set(sources);
-  return ALL_SOURCE_IDS.filter((id) => want.has(id))
-    .map((id) => allTasks.find((t) => t.name === id))
-    .filter(Boolean);
-}
-
-function withSourceTimeout(promise, ms, label) {
-  let timer = null;
-  const failure = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} 响应超时（>${ms}ms），已跳过该源`)), ms);
-  });
-  return Promise.race([promise, failure]).finally(() => { if (timer) clearTimeout(timer); });
-}
-
-function dedupItems(allItems) {
-  const seen = new Set();
-  const deduped = [];
-  for (const item of allItems) {
-    const hashMatch = item.magnet && item.magnet.match(/btih:([a-zA-Z0-9]{32,40})/);
-    const key = hashMatch ? hashMatch[1].toLowerCase() : item.name;
-    if (!seen.has(key)) { seen.add(key); deduped.push(item); }
-  }
-  return deduped;
-}
-
-/**
- * 并发跑所有源：
- *  - Promise.allSettled 语义：任一源失败/超时不影响其它源；
- *  - 每个源独立硬超时（PER_SOURCE_TIMEOUT_MS），慢源绝不拖整体；
- *  - 某源一结束就回调 onSource(ev)，供前端“谁先返回谁先显示”；
- * 返回最终去重后的聚合结果（供一次性 JSON 与流式 done 事件共用）。
- */
-export async function runSearch({
-  query, page = 1, sort = 'relevance', sources = ALL_SOURCE_IDS,
-  waitUntil = null, onSource = null, timeoutMs = PER_SOURCE_TIMEOUT_MS,
-}) {
-  if (!query) throw new Error('Missing query');
-  CCTV10_DEBUG = {};
-  CILIMAO_DEBUG = {};
-  const startTime = Date.now();
-
-  const allTasks = buildTasks(query, page, sort, waitUntil);
-  const tasks = selectTasks(allTasks, sources);
-
-  const wrapped = tasks.map((t) => {
-    const t0 = Date.now();
-    const per = t.timeoutMs || timeoutMs;
-    return withSourceTimeout(t.promise, per, t.name)
-      .then((items) => {
-        const value = Array.isArray(items) ? items : [];
-        if (typeof onSource === 'function') {
-          onSource({ event: 'source', name: t.name, ok: true, count: value.length, items: value, ms: Date.now() - t0 });
-        }
-        return { name: t.name, ok: true, value };
-      })
-      .catch((err) => {
-        const reason = String((err && err.message) || err);
-        console.error(`${t.name} failed:`, err);
-        if (typeof onSource === 'function') {
-          onSource({ event: 'source', name: t.name, ok: false, count: 0, items: [], error: reason, ms: Date.now() - t0 });
-        }
-        return { name: t.name, ok: false, reason };
-      });
-  });
-
-  const outcomes = await Promise.all(wrapped);
-
-  const allItems = [];
-  const debug = {};
-  for (const r of outcomes) {
-    if (r.ok) {
-      allItems.push(...r.value);
-      debug[`${r.name}Status`] = 'fulfilled';
-      debug[`${r.name}Count`] = r.value.length;
-    } else {
-      debug[`${r.name}Status`] = 'rejected';
-      debug[`${r.name}Count`] = 0;
-      debug[`${r.name}Error`] = r.reason;
-    }
-  }
-
-  const deduped = dedupItems(allItems);
-  return {
-    results: deduped,
-    total: deduped.length,
-    totalBeforeDedup: allItems.length,
-    timing: Date.now() - startTime,
-    sources: tasks.map((t) => t.name),
-    sourceOutcomes: outcomes,
-    debug,
-  };
-}
-
-// 兼容 Cloudflare Pages / 旧调用方：一次性聚合成 JSON（本地 server 默认走流式 /api/search?stream=1）
 export async function onRequest(context) {
   const { request, waitUntil } = context;
   const url = new URL(request.url);
   const query = url.searchParams.get('q');
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
-  const sources = (url.searchParams.get('sources') || ALL_SOURCE_IDS.join(','))
-    .split(',').map((s) => s.trim()).filter(Boolean);
 
-  if (!query) return jsonResponse({ error: 'Missing query parameter' }, 400);
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,therarbg,eztv';
+  const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
+
+  if (!query) {
+    return jsonResponse({ error: 'Missing query parameter' }, 400);
+  }
+
+  CCTV10_DEBUG = {};
+  CILIMAO_DEBUG = {};
+
+  const startTime = Date.now();
 
   try {
-    const out = await runSearch({ query, page, sort, sources, waitUntil });
+    const tasks = [];
+
+    if (sources.includes('0magnet')) {
+      tasks.push({ name: '0magnet', promise: fetchFrom0Magnet(query, sort, page, waitUntil) });
+    }
+    if (sources.includes('xiaocao')) {
+      tasks.push({ name: 'xiaocao', promise: fetchFromXiaocao(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('juniorter')) {
+      tasks.push({ name: 'juniorter', promise: fetchFromJuniorter(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('cilibaike')) {
+      tasks.push({ name: 'cilibaike', promise: fetchFromCilibaike(query, page, sort, waitUntil, 'cilibaike') });
+    }
+    if (sources.includes('knaben')) {
+      tasks.push({ name: 'knaben', promise: fetchFromKnaben(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('yuhuage')) {
+      tasks.push({ name: 'yuhuage', promise: fetchFromYuhuage(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('hufeng')) {
+      tasks.push({ name: 'hufeng', promise: fetchFromHufeng(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('cctv10')) {
+      tasks.push({ name: 'cctv10', promise: fetchFromCctv10(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('cilimao')) {
+      tasks.push({ name: 'cilimao', promise: fetchFromCilimao(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('ciliso')) {
+      tasks.push({ name: 'ciliso', promise: fetchFromCilibaike(query, page, sort, waitUntil, 'ciliso') });
+    }
+    if (sources.includes('taocili')) {
+      tasks.push({ name: 'taocili', promise: fetchFromTaocili(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('tpb')) {
+      tasks.push({ name: 'tpb', promise: fetchFromTpb(query, page, sort, waitUntil) });
+    if (sources.includes('piratebay')) {
+      tasks.push({ name: 'piratebay', promise: fetchFromPiratebay(query, page, sort, waitUntil) });
+    }
+    }
+    if (sources.includes('therarbg')) {
+      tasks.push({ name: 'therarbg', promise: fetchFromTherarbg(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('eztv')) {
+      tasks.push({ name: 'eztv', promise: fetchFromEztvSmart(query, page, sort, waitUntil) });
+    }
+
+    const results = await Promise.allSettled(tasks.map(t => t.promise));
+
+    const allItems = [];
+    const debug = {};
+
+    results.forEach((r, i) => {
+      const name = tasks[i].name;
+      if (r.status === 'fulfilled') {
+        allItems.push(...r.value);
+        debug[`${name}Status`] = 'fulfilled';
+        debug[`${name}Count`] = r.value.length;
+      } else {
+        console.error(`${name} failed:`, r.reason);
+        debug[`${name}Status`] = 'rejected';
+        debug[`${name}Count`] = 0;
+        debug[`${name}Error`] = String(r.reason);
+      }
+    });
+
+    const seen = new Set();
+    const deduped = [];
+    for (const item of allItems) {
+      const hashMatch = item.magnet && item.magnet.match(/btih:([a-zA-Z0-9]{32,40})/);
+      const key = hashMatch ? hashMatch[1].toLowerCase() : item.name;
+      if (!seen.has(key)) {
+        seen.add(key);
+        deduped.push(item);
+      }
+    }
+
+    const timing = Date.now() - startTime;
     return jsonResponse({
-      results: out.results,
-      total: out.total,
-      timing: out.timing,
+      results: deduped,
+      total: deduped.length,
+      timing,
+      sourceSites: buildSourceSites(),
       debug: {
-        sources: out.sources,
-        page,
-        totalBeforeDedup: out.totalBeforeDedup,
+        sources: sources,
+        page: page,
+        totalBeforeDedup: allItems.length,
         cctv10Raw: CCTV10_DEBUG,
         cilimaoRaw: CILIMAO_DEBUG,
-        ...out.debug,
+        ...debug,
       },
     });
+
   } catch (err) {
     console.error('Search error:', err);
     return jsonResponse({ error: 'Search failed', detail: String(err), cctv10Raw: CCTV10_DEBUG, cilimaoRaw: CILIMAO_DEBUG }, 502);
   }
+}
+
+// 各源站点主页（供前端"源标签右键跳转源站"用）
+function buildSourceSites() {
+  const cfg = getDomainsConfig();
+  const sites = {};
+  for (const key of Object.keys(cfg)) {
+    const arr = cfg[key];
+    if (Array.isArray(arr) && arr.length) sites[key] = arr[0];
+  }
+  // 硬编码源（不在 domains.json 里）
+  sites['0magnet'] = 'https://0magnet.com';
+  sites['juniorter'] = 'https://torrent.juniorter.in';
+  sites['knaben'] = 'https://knaben.xyz';
+  return sites;
 }
 
 function simplifyMagnet(magnet) {
@@ -196,9 +166,23 @@ function formatBytes(bytes) {
   return `${value.toFixed(2)} ${units[i]}`;
 }
 
-// ========== 域名配置（由 domain_config.js 统一管理，支持在线更新） ==========
+// ========== 读取 domains.json ==========
 function getDomainsConfig() {
-  return getDomains();
+  const data = domainsConfig || {};
+  return {
+    xiaocao: Array.isArray(data.xiaocao) ? data.xiaocao : [],
+    cilibaike: Array.isArray(data.cilibaike) ? data.cilibaike : [],
+    hufeng: Array.isArray(data.hufeng) ? data.hufeng : [],
+    yuhuage: Array.isArray(data.yuhuage) ? data.yuhuage : [],
+    cctv10: Array.isArray(data.cctv10) ? data.cctv10 : [],
+    cilimao: Array.isArray(data.cilimao) ? data.cilimao : [],
+    ciliso: Array.isArray(data.ciliso) ? data.ciliso : [],
+    taocili: Array.isArray(data.taocili) ? data.taocili : [],
+    tpb: Array.isArray(data.tpb) ? data.tpb : [],
+    piratebay: Array.isArray(data.piratebay) ? data.piratebay : [],
+    therarbg: Array.isArray(data.therarbg) ? data.therarbg : [],
+    eztv: Array.isArray(data.eztv) ? data.eztv : [],
+  };
 }
 
 // ========== Knaben ==========
@@ -279,9 +263,9 @@ function parseKnabenResults(data) {
 
 // ========== 磁力百科 / 磁力搜（共用） ==========
 async function fetchFromCilibaike(query, page, sort, waitUntil, sourceKey = 'cilibaike') {
-  // 搜索那一刻按当前时隙实时计算（不读静态名单，不依赖 update_domains 的定时刷新）
-  const domains = sourceKey === 'ciliso' ? getCilisoDomains() : getCilibaikeDomains();
-  if (!domains || domains.length === 0) return [];
+  const config = getDomainsConfig();
+  const domains = config[sourceKey];
+  if (domains.length === 0) return [];
 
   let order = '0';
   switch (sort) {
@@ -296,7 +280,7 @@ async function fetchFromCilibaike(query, page, sort, waitUntil, sourceKey = 'cil
 
   for (const domain of domains) {
     try {
-      const html = await fetchWithCache(`${domain}${searchPath}?lang=zh_CN`, 900, waitUntil);
+      const html = await fetchWithCache(`${domain}${searchPath}?lang=zh_CN`, 3600, waitUntil);
       if (!html.includes('resource-card')) continue;
       const items = parseCilibaikeResults(html, domain, sourceKey);
       if (items.length > 0) return items;
@@ -340,506 +324,7 @@ function parseCilibaikeResults(html, domain, sourceKey = 'cilibaike') {
   return items;
 }
 
-// ========== 1337x（可直连镜像；CF 验证的域名会被自动跳过） ==========
-const X1337X_CANDIDATES = ['https://1337x.la', 'https://1337x.st', 'https://www.1337x.tw', 'https://www.1337xx.to', 'https://1337xto.to'];
-const X1337X_UA = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'zh-CN,zh;q=0.9',
-};
-
-// 1337x 不用 fetchWithCache：偶发 CF 验证页绝不能进缓存（缓存会把“验证页”固化 15 分钟导致源一直 0 结果）
-// 注意：正常 1337x 页面也引用 challenge-platform 脚本，判定只认验证页特有字样，不能误伤真页
-async function fetchX1337x(url) {
-  const resp = await fetch(url, { headers: X1337X_UA, signal: AbortSignal.timeout(10000) });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const text = await resp.text();
-  if (/<title>\s*(just a moment|attention required|请稍候)/i.test(text)) {
-    throw new Error('CF验证');
-  }
-  return text;
-}
-
-function parseX1337xRows(html) {
-  const rows = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)].map((m) => m[1]).filter((r) => /torrent\/\d+/.test(r));
-  const items = [];
-  for (const row of rows) {
-    const link = [...row.matchAll(/<a[^>]*href="(\/torrent\/\d+\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/g)]
-      .find((m) => m[2].replace(/<[^>]+>/g, '').trim());
-    if (!link) continue;
-    const name = link[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
-    if (!name) continue;
-    items.push({
-      name,
-      detailPath: link[1],
-      size: ((row.match(/coll-4 size[^>]*>([^<]+)/) || [])[1] || '').trim(),
-      seeds: parseInt(((row.match(/coll-2 seeds[^>]*>([^<]+)/) || [])[1] || '0').replace(/[^\d]/g, '')) || 0,
-      peers: parseInt(((row.match(/coll-3 leeches[^>]*>([^<]+)/) || [])[1] || '0').replace(/[^\d]/g, '')) || 0,
-      date: ((row.match(/coll-date[^>]*>([^<]+)/) || [])[1] || '').trim(),
-    });
-  }
-  return items;
-}
-
-// 详情页并发抓 magnet（限量并发，单条失败跳过，不拖整体）
-async function attachX1337xMagnets(domain, rows, waitUntil) {
-  const CONCURRENCY = 6;
-  let idx = 0;
-  const worker = async () => {
-    while (idx < rows.length) {
-      const i = idx++;
-      const row = rows[i];
-      try {
-        const html = await fetchX1337x(`${domain}${row.detailPath}`);
-        const m = html.match(/magnet:\?xt=urn:btih:[a-zA-Z0-9]+[^"'\s]*/);
-        if (m) row.magnet = simplifyMagnet(m[0]);
-      } catch (e) { /* 单条详情失败跳过 */ }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, rows.length) }, worker));
-  return rows;
-}
-
-async function fetchFromX1337x(query, page, sort, waitUntil) {
-  const cfg = getDomains().x1337x || [];
-  const domains = (cfg.length ? cfg : X1337X_CANDIDATES).slice(0, 4);
-  const failures = [];
-  // 1337x 是宽松 OR 匹配 + 20条/页：完整文件名（多点号）会让它退回热门列表、多词又噪音爆炸。
-  // 实测 Tom.and.Jerry.2021.1080p.WEBRip.6CH.x264 → 发 "Tom Jerry 2021" 后第 3 页可命中。
-  // 策略：发宽泛查询（剥技术词+停用词）→ 先抓第 1 页（单词搜索保持原速度）→
-  // 本地核心词过滤，第 1 页无命中才补抓第 2/3 页（完整文件名等长查询场景）。
-  const sendQ = broadQuery(query);
-  const coreTokens = tokenizeQuery(sendQ);
-  // 固定按需翻到第 3 页（与前端分页无关）：本地过滤需要多页覆盖，
-  // 完整文件名等长查询时目标条常落在第 2/3 页；命中即停不浪费请求。
-  const maxPages = 3;
-
-  for (const domain of domains) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        let allRows = [];
-        let matched = [];
-        // 第 1 页
-        const html1 = await fetchX1337x(`${domain}/search/${encodeURIComponent(sendQ)}/1/`);
-        const rows1 = parseX1337xRows(html1);
-        if (rows1.length) {
-          allRows.push(...rows1);
-          matched.push(...rows1.filter((r) => titleMatchesTokens(r.name, coreTokens)));
-        } else {
-          failures.push(`${domain}=第1页无结果`);
-        }
-        // 第 1 页无命中才并行补抓剩余页
-        if (!matched.length && maxPages >= 2 && allRows.length) {
-          // allSettled：单页失败只跳过该页，不丢掉其它页已抓到的目标
-          const settled = await Promise.allSettled(
-            Array.from({ length: maxPages - 1 }, (_, i) =>
-              fetchX1337x(`${domain}/search/${encodeURIComponent(sendQ)}/${i + 2}/`)
-            )
-          );
-          settled.forEach((s, i) => {
-            if (s.status === 'fulfilled') {
-              const rows = parseX1337xRows(s.value);
-              if (rows.length) {
-                allRows.push(...rows);
-                matched.push(...rows.filter((r) => titleMatchesTokens(r.name, coreTokens)));
-              }
-            } else {
-              failures.push(`${domain}=第${i + 2}页失败`);
-            }
-          });
-        }
-        if (!allRows.length) break;
-        // 一条都不匹配时退回全部（单核心词/中文查询等场景 1337x 本就给不出精确匹配）
-        const candidates = matched.length ? matched : allRows;
-        await attachX1337xMagnets(domain, candidates.slice(0, 15), waitUntil);
-        const hits = candidates.filter((it) => it.magnet);
-        if (hits.length) {
-          return hits.map((it) => ({
-            name: it.name,
-            size: it.size,
-            date: it.date,
-            seeds: it.seeds,
-            peers: it.peers,
-            magnet: it.magnet,
-            detailUrl: `${domain}${it.detailPath}`,
-            source: 'x1337x',
-          }));
-        }
-        failures.push(`${domain}=详情未取到magnet`);
-        break;
-      } catch (e) {
-        if (attempt === 0) { continue; } // 重试一次（应对偶发 CF 验证）
-        failures.push(`${domain}=${e.message}`);
-      }
-    }
-  }
-  console.error(`x1337x 所有候选失败: ${failures.join('; ')}`);
-  return [];
-}
-
-// ========== 淘磁力（内部 JSON API + 详情页补 magnet） ==========
-function b64FromUtf8(str) {
-  // 中文等非 ASCII 关键词：btoa 直接对 UTF-16 会抛错，先转 UTF-8 字节再编码
-  const bytes = new TextEncoder().encode(str);
-  let bin = '';
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin);
-}
-
-async function fetchFromTaocili(query, page, sort, waitUntil) {
-  const domains = getDomainsConfig().taocili || [];
-  if (domains.length === 0) return [];
-
-  const keyword = encodeURIComponent(b64FromUtf8(query));
-  let sortParam = 'default';
-  if (sort === 'time' || sort === 'newest') sortParam = 'atime';
-  else if (sort === 'length') sortParam = 'size_desc';
-
-  // 站点前端实际翻页参数是 start(偏移)/count(条数)，不是 page
-  const start = Math.max(0, (Math.max(1, page || 1) - 1) * 20);
-
-  for (const domain of domains) {
-    try {
-      const apiUrl = `${domain}/apis/search?keyword=${keyword}&base64=1&detail=1&start=${start}&count=20&type=all&sort=${sortParam}`;
-      const text = await fetchWithCache(apiUrl, 1800, waitUntil);
-      let data;
-      try { data = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
-      if (!data || data.code !== 0 || !Array.isArray(data.items)) continue;
-      const rows = data.items.filter((it) => it && it.name && it._id).slice(0, 20);
-      if (rows.length === 0) continue;
-      const items = rows.map(row => ({
-        name: row.name,
-        size: formatBytes(row.len),
-        date: row.atime ? new Date(row.atime).toISOString().slice(0, 10) : '',
-        magnet: '',
-        detailUrl: `${domain}/magnet/${row._id}`,
-        source: 'taocili',
-      }));
-      if (items.length > 0) return items;
-    } catch (err) {
-      console.error(`Taocili domain ${domain} failed:`, err);
-    }
-  }
-  return [];
-}
-
-// 详情页并发抓 magnet（限量并发，单条失败跳过，不拖整体）
-async function batchFetchTaociliMagnets(rows, domain, waitUntil) {
-  const CONCURRENCY = 6;
-  const results = [];
-  let idx = 0;
-  const worker = async () => {
-    while (idx < rows.length) {
-      const i = idx++;
-      const row = rows[i];
-      try {
-        const detailUrl = `${domain}/magnet/${row._id}`;
-        const html = await fetchWithCache(detailUrl, 3600, waitUntil);
-        const m = html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{40}/);
-        if (!m) continue;
-        results.push({
-          name: row.name,
-          size: formatBytes(row.len),
-          date: row.atime ? new Date(row.atime).toISOString().slice(0, 10) : '',
-          magnet: simplifyMagnet(m[0]),
-          detailUrl,
-          source: 'taocili',
-        });
-      } catch (e) { /* 单条详情失败跳过 */ }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, rows.length) }, worker));
-  return results;
-}
-
-// ========== BtFox ==========
-// 列表页普通 HTML；关键词用无 padding base64；磁力在 /info/{id} 详情页 <input id="mag-link">
-async function fetchFromBtfox(query, page, sort, waitUntil) {
-  const domains = getDomainsConfig().btfox || ['https://btfox20.top'];
-  if (domains.length === 0) return [];
-
-  const wd = Buffer.from(query, 'utf-8').toString('base64').replace(/=+$/, '');
-  let sortParam = 'time';
-  if (sort === 'requests' || sort === 'hits') sortParam = 'hits';
-  else if (sort === 'length') sortParam = 'length';
-  else if (sort === 'relevance' || sort === 'rele') sortParam = 'rele';
-  const pageNum = Math.max(1, page || 1);
-
-  for (const domain of domains) {
-    try {
-      const listUrl = `${domain}/s?wd=${wd}&sort=${sortParam}&page=${pageNum}`;
-      const html = await fetchWithCache(listUrl, 1800, waitUntil);
-      const items = parseBtfoxList(html, domain);
-      if (items.length === 0) continue;
-      return items; // 磁力链接按需加载
-    } catch (err) {
-      console.error(`BtFox domain ${domain} failed:`, err);
-    }
-  }
-  return [];
-}
-
-function parseBtfoxList(html, domain) {
-  const items = [];
-  const blocks = html.split(/<div class="item">/);
-  for (let i = 1; i < blocks.length; i++) {
-    const block = blocks[i];
-    const end = block.indexOf('<div class="box_border">');
-    const seg = end > 0 ? block.slice(0, end) : block;
-    const aMatch = seg.match(/<a[^>]+href="([^"]+)"[^>]*title="([^"]*)"/);
-    if (!aMatch) continue;
-    let href = aMatch[1].trim();
-    if (!href.startsWith('http')) href = domain.replace(/\/+$/, '') + href;
-    if (!href.includes('/info/')) continue;
-    const title = (aMatch[2] || '').replace(/<[^>]+>/g, '').trim();
-    if (!title) continue;
-
-    const noteMatch = seg.match(/<div class="threadlist_note">([\s\S]*?)<\/div>/);
-    let size = '', date = '';
-    if (noteMatch) {
-      const sizeM = noteMatch[1].match(/length[：:][\s\S]*?([\d.]+\s*(?:B|KB|MB|GB|TB))/i);
-      if (sizeM) size = sizeM[1].replace(/\s+/g, ' ');
-      const dateM = noteMatch[1].match(/date[：:][\s\S]*?(\d{4}-\d{2}-\d{2})/);
-      if (dateM) date = dateM[1];
-    }
-    items.push({ name: title, size, date, detailUrl: href, source: 'btfox' });
-  }
-  return items;
-}
-
-async function batchFetchBtfoxMagnets(items, waitUntil) {
-  const CONCURRENCY = 5;
-  const results = [];
-  let idx = 0;
-  const worker = async () => {
-    while (idx < items.length) {
-      const i = idx++;
-      const item = items[i];
-      try {
-        const html = await fetchWithCache(item.detailUrl, 3600, waitUntil);
-        const m = html.match(/<input[^>]+id="mag-link"[^>]+value="(magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40})"/)
-          || html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/);
-        if (m) {
-          results.push({
-            name: item.name,
-            size: item.size,
-            date: item.date,
-            magnet: simplifyMagnet(m[1] || m[0]),
-            detailUrl: item.detailUrl,
-            source: 'btfox',
-          });
-        }
-      } catch (e) { /* 单条详情失败跳过 */ }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker));
-  return results;
-}
-
-// ========== 种子吧 ==========
-// 列表 <li class="media">；磁力在 /seed/{id} 详情页 <textarea id="magnetLink">
-async function fetchFromZhongziba(query, page, sort, waitUntil) {
-  const domains = getDomainsConfig().zhongziba || ['https://zzb10.vip'];
-  if (domains.length === 0) return [];
-
-  const wd = Buffer.from(query, 'utf-8').toString('base64').replace(/=+$/, '');
-  let sortParam = 'rel';
-  if (sort === 'time' || sort === 'newest') sortParam = 'time';
-  else if (sort === 'requests' || sort === 'hits') sortParam = 'hits';
-  else if (sort === 'length') sortParam = 'size';
-  const pageNum = Math.max(1, page || 1);
-
-  for (const domain of domains) {
-    try {
-      const listUrl = `${domain}/search?wd=${wd}&sort=${sortParam}&page=${pageNum}`;
-      const html = await fetchWithCache(listUrl, 1800, waitUntil);
-      const items = parseZhongzibaList(html, domain);
-      if (items.length === 0) continue;
-      return items; // 磁力链接按需加载
-    } catch (err) {
-      console.error(`Zhongziba domain ${domain} failed:`, err);
-    }
-  }
-  return [];
-}
-
-function parseZhongzibaList(html, domain) {
-  const items = [];
-  const blocks = html.split(/<li class="media">/);
-  for (let i = 1; i < blocks.length; i++) {
-    const block = blocks[i];
-    const end = block.indexOf('</li>');
-    const seg = end > 0 ? block.slice(0, end) : block;
-    const aMatch = seg.match(/<a[^>]+href="([^"]+)"[^>]*title="([^"]*)"/);
-    if (!aMatch) continue;
-    let href = aMatch[1].trim();
-    if (!href.startsWith('http')) href = domain.replace(/\/+$/, '') + href;
-    if (!href.includes('/seed/')) continue;
-    const title = (aMatch[2] || '').replace(/<[^>]+>/g, '').trim();
-    if (!title) continue;
-
-    let size = '', date = '';
-    const dateM = seg.match(/日期[：:]\s*<span[^>]*>(\d{4}-\d{2}-\d{2})<\/span>/);
-    if (dateM) date = dateM[1];
-    const sizeM = seg.match(/大小[：:]\s*<span[^>]*>([\d.]+\s*(?:B|KB|MB|GB|TB))<\/span>/i);
-    if (sizeM) size = sizeM[1].replace(/\s+/g, ' ');
-    items.push({ name: title, size, date, detailUrl: href, source: 'zhongziba' });
-  }
-  return items;
-}
-
-async function batchFetchZhongzibaMagnets(items, waitUntil) {
-  const CONCURRENCY = 5;
-  const results = [];
-  let idx = 0;
-  const worker = async () => {
-    while (idx < items.length) {
-      const i = idx++;
-      const item = items[i];
-      try {
-        const html = await fetchWithCache(item.detailUrl, 3600, waitUntil);
-        const m = html.match(/<textarea[^>]+id="magnetLink"[^>]*>\s*(magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40})/)
-          || html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/);
-        if (m) {
-          results.push({
-            name: item.name,
-            size: item.size,
-            date: item.date,
-            magnet: simplifyMagnet(m[1] || m[0]),
-            detailUrl: item.detailUrl,
-            source: 'zhongziba',
-          });
-        }
-      } catch (e) { /* 单条详情失败跳过 */ }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker));
-  return results;
-}
-
-// ========== 磁力池 ==========
-async function fetchFromCilichi(query, page, sort, waitUntil) {
-  const domains = getDomainsConfig().cilichi || ['https://www.cilichi.pro'];
-  if (domains.length === 0) return [];
-  const hex = Buffer.from(query, 'utf-8').toString('hex');
-  let sortParam = 'id';
-  if (sort === 'length') sortParam = 'length';
-  else if (sort === 'requests' || sort === 'hits') sortParam = 'requests';
-  else if (sort === 'relevance' || sort === 'rele') sortParam = '';
-  const pageNum = Math.max(1, page || 1);
-  for (const domain of domains) {
-    try {
-      const sortPart = `_${sortParam}`;
-      const listUrl = `${domain}/cilichi/${hex}_${pageNum}${sortPart}.html`;
-      const html = await fetchWithCache(listUrl, 1800, waitUntil);
-      const items = parseCilichiList(html, domain);
-      if (items.length === 0) continue;
-      return items; // 磁力链接按需加载
-    } catch (err) { console.error(`Cilichi domain ${domain} failed:`, err); }
-  }
-  return [];
-}
-function parseCilichiList(html, domain) {
-  const items = [];
-  const blocks = html.split(/<div class="card border-dashed border-2 mb-2">/);
-  for (let i = 1; i < blocks.length; i++) {
-    const block = blocks[i];
-    const end = block.indexOf('</div>\n</div>');
-    const seg = end > 0 ? block.slice(0, end) : block;
-    const aMatch = seg.match(/<a[^>]+href="([^"]*\/btcililianjie\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/);
-    if (!aMatch) continue;
-    let href = aMatch[1].trim();
-    if (!href.startsWith('http')) href = domain.replace(/\/+$/, '') + href;
-    if (!href.includes('/btcililianjie/')) continue;
-    const title = aMatch[2].replace(/<[^>]+>/g, '').trim();
-    if (!title) continue;
-    let size = '';
-    const sizeM = seg.match(/文件[：:]\s*<span[^>]*>\s*([\d.]+\s*(?:B|KB|MB|GB|TB))/i);
-    if (sizeM) size = sizeM[1].replace(/\s+/g, ' ');
-    items.push({ name: title, size, date: '', detailUrl: href, source: 'cilichi' });
-  }
-  return items;
-}
-async function batchFetchCilichiMagnets(items, waitUntil) {
-  const CONCURRENCY = 5;
-  const results = [];
-  let idx = 0;
-  const worker = async () => {
-    while (idx < items.length) {
-      const i = idx++;
-      const item = items[i];
-      try {
-        const html = await fetchWithCache(item.detailUrl, 3600, waitUntil);
-        const m = html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/)
-          || html.match(/magnet:\?xt=urn:([a-fA-F0-9]{40})/);
-        if (m) {
-          const magnetUrl = m[0].includes('btih:') ? m[0] : `magnet:?xt=urn:btih:${m[1]}`;
-          results.push({ name: item.name, size: item.size, date: item.date, magnet: simplifyMagnet(magnetUrl), detailUrl: item.detailUrl, source: 'cilichi' });
-        }
-      } catch (e) {}
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker));
-  return results;
-}
-
-// ========== Bitsearch ==========
-async function fetchFromBitsearch(query, page, sort, waitUntil) {
-  const domains = getDomainsConfig().bitsearch || ['https://bitsearch.eu'];
-  if (domains.length === 0) return [];
-  let sortBy = 'relevance';
-  if (sort === 'seeders' || sort === 'hits' || sort === 'requests') sortBy = 'seeders';
-  else if (sort === 'length' || sort === 'size') sortBy = 'size';
-  else if (sort === 'time' || sort === 'newest') sortBy = 'created';
-  const pageNum = Math.max(1, page || 1);
-  for (const domain of domains) {
-    try {
-      const url = `${domain}/search?q=${encodeURIComponent(query)}&sortBy=${sortBy}&page=${pageNum}`;
-      const html = await fetchWithCache(url, 1800, waitUntil);
-      const items = parseBitsearchList(html, domain);
-      if (items.length > 0) return items;
-    } catch (err) { console.error(`Bitsearch domain ${domain} failed:`, err); }
-  }
-  return [];
-}
-function parseBitsearchList(html, domain) {
-  const items = [];
-  const cards = html.split('<div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6');
-  for (let i = 1; i < cards.length; i++) {
-    const card = cards[i];
-    const titleM = card.match(/<h3[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
-    if (!titleM) continue;
-    let title = titleM[2].replace(/<[^>]+>/g, '').trim();
-    const magM = card.match(/btih:([A-F0-9]{40})/);
-    if (!magM) continue;
-    const magnet = 'magnet:?xt=urn:btih:' + magM[1].toLowerCase();
-    let size = '';
-    const sizeM = card.match(/<i class="fas fa-download"><\/i>\s*<span>([\d.]+\s*(?:B|KB|MB|GB|TB))/);
-    if (sizeM) size = sizeM[1];
-    let date = '';
-    const dateM = card.match(/<i class="fas fa-calendar"><\/i>\s*<span>([\d/]+)<\/span>/);
-    if (dateM) {
-      const parts = dateM[1].split('/');
-      if (parts.length === 3) date = `${parts[2]}-${parts[0].padStart(2,'0')}-${parts[1].padStart(2,'0')}`;
-    }
-    let seeders = '';
-    const seedM = card.match(/<i class="fas fa-arrow-up"><\/i>\s*<span class="font-medium">(\d+)<\/span>\s*<span>seeders/);
-    if (seedM) seeders = seedM[1];
-    let detailUrl = titleM[1];
-    if (detailUrl.startsWith('/')) detailUrl = domain.replace(/\/+$/, '') + detailUrl;
-    items.push({
-      name: title,
-      size,
-      date,
-      magnet: simplifyMagnet(magnet),
-      detailUrl,
-      source: 'bitsearch',
-      seeders,
-    });
-  }
-  return items;
-}
-
+// ========== Juniorter ==========
 async function fetchFromJuniorter(query, page, sort, waitUntil) {
   const juniorterSort = (sort === 'time' || sort === 'newest') ? 'date' : 'seeds';
   const apiUrl = `${JUNIORTER_API}?q=${encodeURIComponent(query)}&sort=${juniorterSort}&pageSize=50&providers=${encodeURIComponent(JUNIORTER_PROVIDERS)}`;
@@ -1240,9 +725,7 @@ async function fetchFromCilimao(query, page, sort, waitUntil) {
     return [];
   }
 
-  // btoa 只支持 Latin-1：中文等非 ASCII 关键词会抛 InvalidCharacterError，捕获后跳过该源
-  let wordB64;
-  try { wordB64 = btoa(query).replace(/=+$/, ''); } catch (e) { CILIMAO_DEBUG.error = 'btoa non-latin1: ' + e.message; return []; }
+  const wordB64 = btoa(query).replace(/=+$/, '');
   CILIMAO_DEBUG.wordB64 = wordB64;
 
   for (const domain of domains) {
@@ -1328,11 +811,140 @@ async function batchFetchCilimaoDetails(links, concurrency, domain, waitUntil) {
   return results;
 }
 
-// 单次 HTTP 请求超时（fetchWithCache 用）
-const PER_HTTP_TIMEOUT_MS = 10000;
-
 // ========== 工具函数 ==========
-async function fetchWithCache(url, ttl, waitUntil) {
+// ========== 淘磁力（内部 JSON API + 详情页补 magnet） ==========
+function b64FromUtf8(str) {
+  // Worker 安全：btoa 对 >U+00FF 字符会抛错，先转 UTF-8 字节再编码
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+// 淘磁力发布页（wangzhi.icu/config.js）：域名经常更换，失败时实时拉取最新域名跟随
+const TAOCILI_PUBLISH_URL = 'https://wangzhi.icu/config.js';
+async function getFreshTaociliDomains(waitUntil) {
+  try {
+    const text = await fetchWithCache(TAOCILI_PUBLISH_URL, 600, waitUntil);
+    // config.js 形如：{ id: 'cl', name: '淘磁力', urls: ['https://taociliX.shop', ...] }
+    const block = (text.match(/\{[^{}]*淘磁力[^{}]*\}/) || [null])[0];
+    if (!block) return [];
+    const urls = [...block.matchAll(/['"](https?:\/\/[^'"]+)['"]/g)].map((m) => m[1]);
+    return [...new Set(urls)].filter((u) => /^https?:\/\//.test(u));
+  } catch (e) {
+    return [];
+  }
+}
+
+async function fetchFromTaocili(query, page, sort, waitUntil) {
+  const config = getDomainsConfig();
+  let domains = config.taocili || [];
+  if (domains.length === 0) return [];
+
+  const keyword = encodeURIComponent(b64FromUtf8(query));
+  let sortParam = 'default';
+  if (sort === 'time' || sort === 'newest') sortParam = 'atime';
+  else if (sort === 'length') sortParam = 'size_desc';
+
+  const start = Math.max(0, (Math.max(1, page || 1) - 1) * 20);
+  const searchNotes = [];
+
+  const tryDomains = async (list, label) => {
+    for (const domain of list) {
+      try {
+        const apiUrl = `${domain}/apis/search?keyword=${keyword}&base64=1&detail=1&start=${start}&count=20&type=all&sort=${sortParam}`;
+        let text;
+        try {
+          text = await fetchWithCache(apiUrl, 1800, waitUntil);
+        } catch (err) {
+          // 5xx（套 CF 的站对 Workers 出口常返回 520）：换移动端 UA 重试一次
+          try {
+            text = await fetchWithCache(apiUrl, 60, waitUntil, {
+              'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            });
+          } catch (err2) {
+            throw new Error(`${err.message}; 移动UA重试: ${err2.message}`);
+          }
+        }
+        let data;
+        try { data = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
+        if (!data || data.code !== 0 || !Array.isArray(data.items)) {
+          searchNotes.push(`${domain}${label}: code=${data && data.code} items=${data && Array.isArray(data.items) ? data.items.length : '无'}`);
+          continue;
+        }
+        const rows = data.items.filter((it) => it && it.name && it._id).slice(0, 20);
+        if (rows.length === 0) { searchNotes.push(`${domain}${label}: 搜索无结果`); continue; }
+        const items = await batchFetchTaociliMagnets(rows, domain, waitUntil);
+        if (items.length > 0) return items;
+        const f = items.failures || {};
+        searchNotes.push(`${domain}${label}: 搜索${rows.length}条但详情页全失败 (http=${f.http||0} 无magnet=${f.empty||0} 其他=${f.other||0})`);
+      } catch (err) {
+        searchNotes.push(`${domain}${label}: ${err && err.message ? err.message : String(err)}`);
+        console.error(`Taocili domain ${domain} failed:`, err);
+      }
+    }
+    return null;
+  };
+
+  // 第一轮：配置文件里的域名
+  const r1 = await tryDomains(domains, '');
+  if (r1) return r1;
+
+  // 第二轮：配置全失败时，实时拉发布页最新域名跟随（站点换域名后自动恢复）
+  const fresh = await getFreshTaociliDomains(waitUntil);
+  const freshUnknown = fresh.filter((d) => !domains.includes(d));
+  if (freshUnknown.length > 0) {
+    const r2 = await tryDomains(freshUnknown, '(发布页)');
+    if (r2) return r2;
+  }
+
+  // 把诊断信息抛给上层（debug.taociliError 可见），不静默吞掉
+  throw new Error('淘磁力全域名失败: ' + (searchNotes.join(' | ') || '无可用域名'));
+}
+
+// 详情页并发抓 magnet（限量并发，单条失败跳过，不拖整体）
+async function batchFetchTaociliMagnets(rows, domain, waitUntil) {
+  const CONCURRENCY = 6;
+  const results = [];
+  const failures = { http: 0, empty: 0, other: 0 };
+  let idx = 0;
+  const worker = async () => {
+    while (idx < rows.length) {
+      const i = idx++;
+      const row = rows[i];
+      try {
+        const detailUrl = `${domain}/magnet/${row._id}`;
+        // 详情页加 Referer（站点可能校验来源），不用公共缓存以免串头
+        const resp = await fetch(detailUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': `${domain}/`,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+          },
+        });
+        if (!resp.ok) { failures.http++; continue; }
+        const html = await resp.text();
+        const m = html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{40}/);
+        if (!m) { failures.empty++; continue; }
+        results.push({
+          name: row.name,
+          size: formatBytes(row.len),
+          date: row.atime ? new Date(row.atime).toISOString().slice(0, 10) : '',
+          magnet: simplifyMagnet(m[0]),
+          detailUrl,
+          source: 'taocili',
+        });
+      } catch (e) { failures.other++; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, rows.length) }, worker));
+  results.failures = failures;
+  return results;
+}
+
+async function fetchWithCache(url, ttl, waitUntil, extraHeaders) {
   const cacheKey = new Request(url, { method: 'GET' });
   const cache = caches.default;
 
@@ -1343,9 +955,8 @@ async function fetchWithCache(url, ttl, waitUntil) {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'zh-CN,zh;q=0.9',
+        ...(extraHeaders || {}),
       },
-      // 单次 HTTP 请求 10s 超时（再叠加每源整体 12s 上限），防止某个连接挂死
-      signal: AbortSignal.timeout(PER_HTTP_TIMEOUT_MS),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
 
@@ -1366,56 +977,13 @@ async function fetchWithCache(url, ttl, waitUntil) {
 
   return await response.text();
 }
-
-function jsonResponse(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Access-Control-Allow-Origin': '*',
-    },
-  });
-}
-
-// ========== 查询规范化 + 本地过滤（借鉴 magnet-finder：站点只捞候选，精确匹配在本地） ==========
-// 技术词：发站点前剥掉（站点的关键词搜索往往匹配不到 1080p/webrip/x264 这类词）
-const QUERY_NOISE_RE = /^(?:s\d{1,2}(?:e\d{1,3})?|e\d{1,3}|\d{3,4}p|x26[45]|h26[45]|hevc|xvid|divx|web|webrip|webdl|dl|hdtv|bluray|brrip|bdrip|dvdrip|remux|repack|proper|internal|amzn|dsnp|nf|hmax|aac|ac3|eac3|ddp\d?|dts|10bit|hdr|sdr|multi|complete|season|episode|6ch|2ch)$/i;
-// 停用词：1337x 是宽松 OR 匹配，and/the 这类词会让噪音爆炸（搜 Tom and Jerry 全是含 and 的片）
-const X1337X_STOPWORDS = new Set(['and', 'or', 'the', 'a', 'an', 'of', 'for', 'with', 'in', 'on', 'at', 'to', 'by', 'is']);
-
-function normalizeTitle(s) {
-  return String(s == null ? '' : s).toLowerCase()
-    .replace(/[._+\-\[\](){}:,!?'"~\\/|@#$%^&*=<>;]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function tokenizeQuery(query) {
-  return normalizeTitle(query).split(' ').filter(Boolean);
-}
-
-/** 标题是否包含全部 token（子串匹配） */
-function titleMatchesTokens(title, tokens) {
-  if (!tokens || !tokens.length) return true;
-  const t = normalizeTitle(title);
-  return tokens.every((tok) => t.indexOf(tok) >= 0);
-}
-
-/** 宽泛查询：剥技术词 + 停用词，只留核心词发给站点（本地过滤保证精度） */
-function broadQuery(query) {
-  const tokens = tokenizeQuery(query);
-  const kept = tokens.filter((t) => !QUERY_NOISE_RE.test(t) && !X1337X_STOPWORDS.has(t));
-  return (kept.length ? kept : tokens).join(' ');
-}
-
+// ========== TPB（apibay 官方 API，一次返回全部命中） ==========
+const TPB_DOMAINS = ['https://apibay.org'];
 function isoFromUnix(sec) {
   const n = Number(sec);
   return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toISOString().slice(0, 10) : '';
 }
 
-// ========== TPB（apibay.org 官方 API，一次返回全部命中） ==========
-const TPB_DOMAINS = ['https://apibay.org'];
-// ========== The Pirate Bay（apibay JSON API） ==========
 async function fetchFromTpb(query, page, sort, waitUntil) {
   const cfg = getDomainsConfig().tpb;
   const domains = (cfg && cfg.length) ? cfg : TPB_DOMAINS;
@@ -1426,6 +994,7 @@ async function fetchFromTpb(query, page, sort, waitUntil) {
       let arr;
       try { arr = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
       if (!Array.isArray(arr)) continue;
+      // apibay 无结果时返回一条 id=0 的占位记录，要滤掉
       return arr
         .filter((r) => r && r.id !== '0' && r.info_hash && !/^0+$/.test(r.info_hash))
         .map((r) => ({
@@ -1456,10 +1025,7 @@ async function fetchFromPiratebay(query, page, sort, waitUntil) {
     const proxyHtml = await fetchWithCache('https://piratebayproxy.info/', 3600, waitUntil);
     const found = [...proxyHtml.matchAll(/href="(https?:\/\/thepiratebay\.[a-z0-9.-]+)\/?/g)]
       .map(m => m[1].replace(/\/+$/, ''));
-    if (found.length > 0) {
-      // 把发现的域名排到前面，已配置的也保留
-      domains = [...new Set([...found, ...domains])];
-    }
+    if (found.length > 0) domains = [...new Set([...found, ...domains])];
   } catch (e) { /* 代理页抓不到就用配置的 */ }
   let sortNum = '99';
   if (sort === 'time' || sort === 'newest') sortNum = '3';
@@ -1496,19 +1062,14 @@ function parsePiratebayHtml(html, domain) {
     const sizeM = row.match(/<td align="right">([\d.]+)&nbsp;([A-Za-z]+)<\/td>/);
     if (sizeM) size = sizeM[1] + ' ' + sizeM[2];
     const nums = [...row.matchAll(/<td align="right">(\d+)<\/td>/g)].map(m => m[1]);
-    const seeders = nums[0] || '';
-    const leechers = nums[1] || '';
     let detailUrl = titleM[1];
     if (detailUrl.startsWith('/')) detailUrl = domain.replace(/\/+$/, '') + detailUrl;
     items.push({
-      name: title,
-      size,
-      date,
+      name: title, size, date,
       magnet: simplifyMagnet(magM[1]),
-      detailUrl,
-      source: 'piratebay',
-      seeders,
-      peers: leechers,
+      detailUrl, source: 'piratebay',
+      seeds: Number(nums[0]) || 0,
+      peers: Number(nums[1]) || 0,
     });
   }
   return items;
@@ -1547,7 +1108,7 @@ async function fetchFromTherarbg(query, page, sort, waitUntil) {
   return [];
 }
 
-// ========== EZTV（只能按 imdb_id 查；id 由 fetchFromEztvSmart 从 TPB/therarbg 结果推断） ==========
+// ========== EZTV（镜像 API，只能按 imdb_id 查询） ==========
 const EZTV_DOMAINS = ['https://eztvx.to', 'https://eztv.re', 'https://eztv.tf'];
 async function fetchFromEztv(imdbId, page, sort, waitUntil) {
   const id = String(imdbId || '').replace(/^tt/i, '');
@@ -1580,8 +1141,7 @@ async function fetchFromEztv(imdbId, page, sort, waitUntil) {
   return [];
 }
 
-// EZTV 无关键词搜索：先从带 imdb 的源（TPB/therarbg）收集 imdb_id（取出现最多的），再查 EZTV。
-// 依赖 fetchWithCache：主任务已抓过的话这里直接命中缓存，不重复网络请求。
+// EZTV 只能按 IMDb 编号查：先从 TPB/RARBG 结果里收集 imdb 字段，取出现最多的编号去查
 async function fetchFromEztvSmart(query, page, sort, waitUntil) {
   const counts = new Map();
   for (const fn of [fetchFromTpb, fetchFromTherarbg]) {
@@ -1601,42 +1161,12 @@ async function fetchFromEztvSmart(query, page, sort, waitUntil) {
   return fetchFromEztv(best, page, sort, waitUntil);
 }
 
-// 供回归测试引用的纯函数（不联网）
-export {
-  normalizeTitle,
-  tokenizeQuery,
-  broadQuery,
-  titleMatchesTokens,
-  parseX1337xRows,
-  parseCilibaikeResults,
-  dedupItems,
-  simplifyMagnet,
-  formatBytes,
-  b64FromUtf8,
-};
-
-// 按需抓取磁力链接：根据 detailUrl 路径模式自动选择正则
-export async function fetchMagnetFromDetailUrl(detailUrl) {
-  if (!detailUrl) return '';
-  try {
-    const html = await fetchWithCache(detailUrl, 3600);
-    let m;
-    // btfox: <input id="mag-link" value="magnet:..."
-    m = html.match(/<input[^>]+id="mag-link"[^>]+value="(magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40})"/);
-    if (m) return simplifyMagnet(m[1]);
-    // zhongziba: <textarea id="magnetLink">magnet:...</textarea>
-    m = html.match(/<textarea[^>]+id="magnetLink"[^>]*>(magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40})/);
-    if (m) return simplifyMagnet(m[1]);
-    // taocili: 直接 magnet:?xt=...
-    if (detailUrl.includes('/magnet/')) {
-      m = html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/);
-      if (m) return simplifyMagnet(m[0]);
-    }
-    // cilichi: 直接 magnet:?xt=...
-    m = html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/);
-    if (m) return simplifyMagnet(m[0]);
-    return '';
-  } catch (e) {
-    return '';
-  }
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
+    },
+  });
 }
