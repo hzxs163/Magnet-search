@@ -73,9 +73,9 @@ export async function onRequest(context) {
     }
     if (sources.includes('tpb')) {
       tasks.push({ name: 'tpb', promise: fetchFromTpb(query, page, sort, waitUntil) });
+    }
     if (sources.includes('piratebay')) {
       tasks.push({ name: 'piratebay', promise: fetchFromPiratebay(query, page, sort, waitUntil) });
-    }
     }
     if (sources.includes('therarbg')) {
       tasks.push({ name: 'therarbg', promise: fetchFromTherarbg(query, page, sort, waitUntil) });
