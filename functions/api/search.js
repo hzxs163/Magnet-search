@@ -23,7 +23,7 @@ export async function onRequest(context) {
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
 
-  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,therarbg,eztv';
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,therarbg,eztv,btfox';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
 
   if (!query) {
@@ -79,6 +79,9 @@ export async function onRequest(context) {
     }
     if (sources.includes('eztv')) {
       tasks.push({ name: 'eztv', promise: fetchFromEztvSmart(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('btfox')) {
+      tasks.push({ name: 'btfox', promise: fetchFromBtfox(query, page, sort, waitUntil) });
     }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
@@ -178,6 +181,7 @@ function getDomainsConfig() {
     tpb: Array.isArray(data.tpb) ? data.tpb : [],
     therarbg: Array.isArray(data.therarbg) ? data.therarbg : [],
     eztv: Array.isArray(data.eztv) ? data.eztv : [],
+    btfox: Array.isArray(data.btfox) ? data.btfox : [],
   };
 }
 
@@ -937,6 +941,92 @@ async function batchFetchTaociliMagnets(rows, domain, waitUntil) {
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, rows.length) }, worker));
   results.failures = failures;
+  return results;
+}
+
+// ========== BtFox ==========
+// 普通 HTML 源；关键词无 padding base64；磁力在 /info/{id} 详情页
+async function fetchFromBtfox(query, page, sort, waitUntil) {
+  const domains = getDomainsConfig().btfox.length
+    ? getDomainsConfig().btfox
+    : ['https://btfox20.top'];
+  if (domains.length === 0) return [];
+
+  const wd = b64FromUtf8(query).replace(/=+$/, '');
+  let sortParam = 'time';
+  if (sort === 'requests' || sort === 'hits') sortParam = 'hits';
+  else if (sort === 'length') sortParam = 'length';
+  else if (sort === 'relevance' || sort === 'rele') sortParam = 'rele';
+  const pageNum = Math.max(1, page || 1);
+
+  for (const domain of domains) {
+    try {
+      const listUrl = `${domain}/s?wd=${wd}&sort=${sortParam}&page=${pageNum}`;
+      const html = await fetchWithCache(listUrl, 1800, waitUntil);
+      const items = parseBtfoxList(html, domain);
+      if (items.length === 0) continue;
+      return await batchFetchBtfoxMagnets(items, waitUntil);
+    } catch (err) {
+      console.error(`BtFox domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+function parseBtfoxList(html, domain) {
+  const items = [];
+  const blocks = html.split(/<div class="item">/);
+  for (let i = 1; i < blocks.length; i++) {
+    const block = blocks[i];
+    const end = block.indexOf('<div class="box_border">');
+    const seg = end > 0 ? block.slice(0, end) : block;
+    const aMatch = seg.match(/<a[^>]+href="([^"]+)"[^>]*title="([^"]*)"/);
+    if (!aMatch) continue;
+    let href = aMatch[1].trim();
+    if (!href.startsWith('http')) href = domain.replace(/\/+$/, '') + href;
+    if (!href.includes('/info/')) continue;
+    const title = (aMatch[2] || '').replace(/<[^>]+>/g, '').trim();
+    if (!title) continue;
+
+    const noteMatch = seg.match(/<div class="threadlist_note">([\s\S]*?)<\/div>/);
+    let size = '', date = '';
+    if (noteMatch) {
+      const sizeM = noteMatch[1].match(/length[：:][\s\S]*?([\d.]+\s*(?:B|KB|MB|GB|TB))/i);
+      if (sizeM) size = sizeM[1].replace(/\s+/g, ' ');
+      const dateM = noteMatch[1].match(/date[：:][\s\S]*?(\d{4}-\d{2}-\d{2})/);
+      if (dateM) date = dateM[1];
+    }
+    items.push({ name: title, size, date, detailUrl: href, source: 'btfox' });
+  }
+  return items;
+}
+
+async function batchFetchBtfoxMagnets(items, waitUntil) {
+  const CONCURRENCY = 5;
+  const results = [];
+  let idx = 0;
+  const worker = async () => {
+    while (idx < items.length) {
+      const i = idx++;
+      const item = items[i];
+      try {
+        const html = await fetchWithCache(item.detailUrl, 3600, waitUntil);
+        const m = html.match(/<input[^>]+id="mag-link"[^>]+value="(magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40})"/)
+          || html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/);
+        if (m) {
+          results.push({
+            name: item.name,
+            size: item.size,
+            date: item.date,
+            magnet: simplifyMagnet(m[1] || m[0]),
+            detailUrl: item.detailUrl,
+            source: 'btfox',
+          });
+        }
+      } catch (e) { /* 单条详情失败跳过 */ }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker));
   return results;
 }
 
