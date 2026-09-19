@@ -1640,16 +1640,3 @@ export async function fetchMagnetFromDetailUrl(detailUrl) {
     return '';
   }
 }
-
-export async function onRequest(context) {
-  const { request, waitUntil } = context;
-  const url = new URL(request.url);
-  const query = url.searchParams.get('q');
-  const page = parseInt(url.searchParams.get('page') || '1', 10);
-  const sort = url.searchParams.get('sort') || 'relevance';
-  const sourcesParam = url.searchParams.get('sources') || ALL_SOURCE_IDS.join(',');
-  const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
-  if (!query) return new Response(JSON.stringify({ error: 'Missing q' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-  const out = await runSearch({ query, page, sort, sources, waitUntil });
-  return new Response(JSON.stringify(out), { headers: { 'Content-Type': 'application/json' } });
-}
