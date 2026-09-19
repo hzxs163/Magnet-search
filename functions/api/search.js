@@ -23,7 +23,7 @@ export async function onRequest(context) {
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
 
-  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,therarbg,eztv,btfox,zhongziba';
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,therarbg,eztv,btfox,zhongziba,cilichi';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
 
   if (!query) {
@@ -85,6 +85,9 @@ export async function onRequest(context) {
     }
     if (sources.includes('zhongziba')) {
       tasks.push({ name: 'zhongziba', promise: fetchFromZhongziba(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('cilichi')) {
+      tasks.push({ name: 'cilichi', promise: fetchFromCilichi(query, page, sort, waitUntil) });
     }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
@@ -186,6 +189,7 @@ function getDomainsConfig() {
     eztv: Array.isArray(data.eztv) ? data.eztv : [],
     btfox: Array.isArray(data.btfox) ? data.btfox : [],
     zhongziba: Array.isArray(data.zhongziba) ? data.zhongziba : [],
+    cilichi: Array.isArray(data.cilichi) ? data.cilichi : [],
   };
 }
 
@@ -1072,6 +1076,74 @@ async function batchFetchZhongzibaMagnets(items, waitUntil) {
         const m = html.match(/<textarea[^>]+id="magnetLink"[^>]*>\s*(magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40})/)
           || html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/);
         if (m) results.push({ name: item.name, size: item.size, date: item.date, magnet: simplifyMagnet(m[1] || m[0]), detailUrl: item.detailUrl, source: 'zhongziba' });
+      } catch (e) {}
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker));
+  return results;
+}
+
+// ========== 磁力池 ==========
+async function fetchFromCilichi(query, page, sort, waitUntil) {
+  const domains = getDomainsConfig().cilichi.length ? getDomainsConfig().cilichi : ['https://www.cilichi.pro'];
+  if (domains.length === 0) return [];
+  const bytes = new TextEncoder().encode(query);
+  let hex = '';
+  for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+  let sortParam = 'id';
+  if (sort === 'length') sortParam = 'length';
+  else if (sort === 'requests' || sort === 'hits') sortParam = 'requests';
+  else if (sort === 'relevance' || sort === 'rele') sortParam = '';
+  const pageNum = Math.max(1, page || 1);
+  for (const domain of domains) {
+    try {
+      const sortPart = `_${sortParam}`;
+      const listUrl = `${domain}/cilichi/${hex}_${pageNum}${sortPart}.html`;
+      const html = await fetchWithCache(listUrl, 1800, waitUntil);
+      const items = parseCilichiList(html, domain);
+      if (items.length === 0) continue;
+      return await batchFetchCilichiMagnets(items, waitUntil);
+    } catch (err) { console.error(`Cilichi domain ${domain} failed:`, err); }
+  }
+  return [];
+}
+function parseCilichiList(html, domain) {
+  const items = [];
+  const blocks = html.split(/<div class="card border-dashed border-2 mb-2">/);
+  for (let i = 1; i < blocks.length; i++) {
+    const block = blocks[i];
+    const end = block.indexOf('</div>\n</div>');
+    const seg = end > 0 ? block.slice(0, end) : block;
+    const aMatch = seg.match(/<a[^>]+href="([^"]*\/btcililianjie\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+    if (!aMatch) continue;
+    let href = aMatch[1].trim();
+    if (!href.startsWith('http')) href = domain.replace(/\/+$/, '') + href;
+    if (!href.includes('/btcililianjie/')) continue;
+    const title = aMatch[2].replace(/<[^>]+>/g, '').trim();
+    if (!title) continue;
+    let size = '';
+    const sizeM = seg.match(/文件[：:]\s*<span[^>]*>\s*([\d.]+\s*(?:B|KB|MB|GB|TB))/i);
+    if (sizeM) size = sizeM[1].replace(/\s+/g, ' ');
+    items.push({ name: title, size, date: '', detailUrl: href, source: 'cilichi' });
+  }
+  return items;
+}
+async function batchFetchCilichiMagnets(items, waitUntil) {
+  const CONCURRENCY = 5;
+  const results = [];
+  let idx = 0;
+  const worker = async () => {
+    while (idx < items.length) {
+      const i = idx++;
+      const item = items[i];
+      try {
+        const html = await fetchWithCache(item.detailUrl, 3600, waitUntil);
+        const m = html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/)
+          || html.match(/magnet:\?xt=urn:([a-fA-F0-9]{40})/);
+        if (m) {
+          const magnetUrl = m[0].includes('btih:') ? m[0] : `magnet:?xt=urn:btih:${m[1]}`;
+          results.push({ name: item.name, size: item.size, date: item.date, magnet: simplifyMagnet(magnetUrl), detailUrl: item.detailUrl, source: 'cilichi' });
+        }
       } catch (e) {}
     }
   };
