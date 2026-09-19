@@ -61,5 +61,8 @@
   "piratebay": [
     "https://thepiratebay.bond",
     "https://thepiratebay.rocks"
+  ],
+  "yts": [
+    "https://yts.lt"
   ]
 }
