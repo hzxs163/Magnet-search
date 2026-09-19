@@ -541,6 +541,31 @@ def extract_tpb_domains():
     return []
 
 
+
+# ========== piratebay（海盗湾 HTML 版，从 piratebayproxy.info 提取可用域名） ==========
+def extract_piratebay_domains():
+    """从 piratebayproxy.info 提取 thepiratebay.* 镜像域名，逐个探测搜索页可用。"""
+    try:
+        html = fetch_text('https://piratebayproxy.info/', timeout=12)
+        found = sorted(set(re.findall(r'https?://(thepiratebay\.[a-z0-9.-]+)', html)))
+        for host in found:
+            try:
+                url = f'https://{host}/search/test/1/99/0'
+                text = fetch_text(url, timeout=10)
+                if 'magnet:?xt=urn:btih' in text:
+                    print(f'[piratebay] {host} 可用')
+                    return [f'https://{host}']
+            except Exception:
+                continue
+        # 探测失败就返回第一个作为候选
+        if found:
+            print(f'[piratebay] 探测失败，使用第一个候选: {found[0]}')
+            return [f'https://{found[0]}']
+    except Exception as e:
+        print(f'[piratebay] 提取失败: {e}')
+    return []
+
+
 # ========== therarbg（RARBG 延续，JSON API） ==========
 def extract_therarbg_domains():
     """therarbg：JSON API 探测（keywords 多词必须 %20 编码，用 + 会返回 0 条）。"""
@@ -603,8 +628,12 @@ def main():
         'ciliso': [],
         'taocili': [],
         'tpb': [],
+        'piratebay': [],
         'therarbg': [],
         'eztv': [],
+        'btfox': [],
+        'zhongziba': [],
+        'cilichi': [],
     }
 
     result['xiaocao'] = extract_xiaocao_domains()
@@ -684,6 +713,75 @@ def main():
             print(f'[淘磁力] 提取为空，保留上次的 {len(fallback)} 个域名')
         result['taocili'] = fallback
 
+    # ========== BtFox（跟随入口跳转） ==========
+    def extract_btfox_domains():
+        entry = 'https://btfox.xyz'
+        domains = set()
+        print(f'[BtFox] 请求入口: {entry}')
+        try:
+            _, final_url = fetch_url(entry, timeout=15)
+            m = re.match(r'(https?://[^/]+)', final_url)
+            if m:
+                origin = m.group(1).rstrip('/')
+                if is_valid_domain_url(origin):
+                    domains.add(origin)
+                    print(f'[BtFox] 跳转落地: {origin}')
+        except Exception as e:
+            print(f'[BtFox] 入口请求失败: {e}')
+        # 入口域名本身也保留
+        domains.add('https://btfox.xyz')
+        return sorted(domains)
+
+    # ========== 种子吧（跟随入口跳转） ==========
+    def extract_zhongziba_domains():
+        entry = 'https://seed8.org'
+        domains = set()
+        print(f'[种子吧] 请求入口: {entry}')
+        try:
+            _, final_url = fetch_url(entry, timeout=15)
+            m = re.match(r'(https?://[^/]+)', final_url)
+            if m:
+                origin = m.group(1).rstrip('/')
+                if is_valid_domain_url(origin):
+                    domains.add(origin)
+                    print(f'[种子吧] 跳转落地: {origin}')
+        except Exception as e:
+            print(f'[种子吧] 入口请求失败: {e}')
+        domains.add('https://seed8.org')
+        domains.add('https://zhongziba.cc')
+        return sorted(domains)
+
+    # ========== 磁力池（跟随入口跳转） ==========
+    def extract_cilichi_domains():
+        entry = 'https://cilichi.com'
+        domains = set()
+        print(f'[磁力池] 请求入口: {entry}')
+        try:
+            _, final_url = fetch_url(entry, timeout=15)
+            m = re.match(r'(https?://[^/]+)', final_url)
+            if m:
+                origin = m.group(1).rstrip('/')
+                if is_valid_domain_url(origin):
+                    domains.add(origin)
+                    print(f'[磁力池] 跳转落地: {origin}')
+        except Exception as e:
+            print(f'[磁力池] 入口请求失败: {e}')
+        domains.add('https://cilichi.com')
+        domains.add('https://www.cilichi.net')
+        return sorted(domains)
+
+    for name, fn in [('btfox', extract_btfox_domains),
+                     ('zhongziba', extract_zhongziba_domains),
+                     ('cilichi', extract_cilichi_domains)]:
+        found = fn()
+        if found:
+            result[name] = found
+        else:
+            fallback = previous.get(name, [])
+            if fallback:
+                print(f'[{name}] 提取为空，保留上次的 {len(fallback)} 个域名')
+            result[name] = fallback
+
     OUTPUT_FILE.write_text(
         json.dumps(result, ensure_ascii=False, indent=2),
         encoding='utf-8',
@@ -700,6 +798,7 @@ def main():
     print(f'  磁力搜: {len(result["ciliso"])} 个')
     print(f'  淘磁力: {len(result["taocili"])} 个')
     print(f'  TPB: {len(result["tpb"])} 个')
+    print(f'  海盗湾HTML: {len(result["piratebay"])} 个')
     print(f'  therarbg: {len(result["therarbg"])} 个')
     print(f'  EZTV: {len(result["eztv"])} 个')
     if result['cctv10']:
@@ -717,6 +816,10 @@ def main():
     if result['taocili']:
         print('  淘磁力域名:')
         for d in result['taocili']:
+            print(f'    - {d}')
+    if result['piratebay']:
+        print('  海盗湾HTML域名:')
+        for d in result['piratebay']:
             print(f'    - {d}')
     if result['tpb']:
         print('  TPB域名:')
