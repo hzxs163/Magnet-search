@@ -1,1463 +1,1655 @@
-<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>磁力搜索 · 本地版</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%A7%B2%3C/text%3E%3C/svg%3E">
-<style>
-  /* ---------- tokens ---------- */
-  /* ---------- 淡雅书院风 ---------- */
-  :root {
-    --bg: #f7f3ea;            /* 米白纸色 */
-    --panel: #fdfaf3;         /* 卡片纸色 */
-    --panel-2: #f2ecdf;       /* 稍深的纸色 */
-    --line: #e0d7c4;          /* 淡棕边框 */
-    --ink: #3a3226;           /* 墨色主文字 */
-    --muted: #6b6152;         /* 次要文字 */
-    --faint: #9b9080;         /* 淡墨辅助 */
-    --seed: #5b8a5b;          /* 活种子 墨绿 */
-    --weak: #b07d17;          /* 弱种子 棕黄 */
-    --dead: #b04a3a;          /* 死种子 赭红 */
-    --accent: #8a6a4a;        /* 暖棕主色 */
-    --accent-hover: #6f5238;
-    --accent-dim: #efe6d6;    /* 浅棕底 */
-    --sel: rgba(138,106,74,.13);
-  }
+// Pages Functions - /api/search
 
-  * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; }
-  body {
-    background: var(--bg);
-    color: var(--ink);
-    font: 14px/1.45 -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-    -webkit-font-smoothing: antialiased;
-  }
-  .mono, .title-cell, .hash, #query, .swarm-num, .seed-num {
-    font-family: ui-monospace, "SF Mono", "Cascadia Code", Consolas, "Courier New", monospace;
-  }
-  button { font: inherit; cursor: pointer; }
-  a { color: var(--accent); }
-  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+// 域名配置实时读取在线配置（远程 > 本地缓存 > 内置 domains.json），更新后无需重启
+import { getDomains } from './domain_config.js';
+// 磁力百科/磁力搜：搜索时按当前 30 分钟时隙实时算子域名（FNV-1a+xorshift），永远最新
+import { getCilisoDomains, getCilibaikeDomains } from './dyn_domains.js';
 
-  /* ---------- layout ---------- */
-  .wrap { max-width: 1180px; margin: 0 auto; padding: 20px 22px 40px; }
+const JUNIORTER_API = 'https://torrent.juniorter.in/api/search-stream';
+const JUNIORTER_PROVIDERS = [
+  'yts', 'eztv', 'torrentclaw', 'piratebay', 'knaben', '1337x', 'limetorrents',
+  'torrentfunk', 'torrentdownloads', 'torlock', 'yourbittorrent', 'magnetz',
+  'bitsearch', 'solidtorrents', 'torrentscsv', 'therarbg', 'animetosho', 'nyaa',
+  'mikan', 'tokyotosho', 'dmhy', 'acgrip', 'subsplease', 'rutor',
+  'audiobookbay', 'academictorrents'
+].join(',');
 
-  .brand {
-    display: flex; align-items: baseline; gap: 10px; margin-bottom: 18px; flex-wrap: wrap;
-  }
-  .brand h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: .2px; }
-  .brand .sub { color: var(--muted); font-size: 13px; }
-  .brand .sub .dot-sep { color: var(--faint); margin: 0 4px; }
+const KNABEN_API = 'https://api.knaben.org/v1';
 
-  .searchbar {
-    display: flex; gap: 10px; align-items: stretch; margin-bottom: 14px;
-  }
-  .searchbar input {
-    flex: 1; min-width: 0;
-    font-size: 15px; color: var(--ink);
-    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
-    padding: 11px 14px;
-  }
-  .searchbar input::placeholder { color: var(--faint); }
-  .searchbar input:focus { border-color: var(--accent); outline: none; }
-  .searchbar button {
-    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
-    padding: 0 22px; font-size: 15px; font-weight: 600;
-  }
-  .searchbar button:hover { background: var(--accent-hover); }
-  .searchbar button:disabled { opacity: .55; cursor: default; }
-  .searchbar button.running { background: var(--accent-dim); }
+let CCTV10_DEBUG = {};
+let CILIMAO_DEBUG = {};
 
-  /* ---------- source chips ---------- */
-  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-  .chip {
-    display: inline-flex; align-items: center; gap: 6px;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
-    padding: 5px 12px; color: var(--muted); font-size: 13px; user-select: none;
-    cursor: pointer;
-  }
-  .chip[data-on] { color: var(--ink); border-color: var(--accent); background: var(--sel); }
-  .chip .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .9; }
-  .chip[data-on] .dot { color: var(--accent); }
-  .chip .ctx-hint { font-size: 10.5px; opacity: .55; margin-left: 2px; }
+const ALL_SOURCE_IDS = ['0magnet','xiaocao','juniorter','cilibaike','knaben','yuhuage','hufeng','cctv10','cilimao','ciliso','x1337x','taocili','tpb','piratebay','therarbg','eztv','btfox','zhongziba','cilichi','bitsearch'];
+// 单个“搜索源”的整体硬超时：到点就放弃该源，其它源与整页都不会被它拖住
+const PER_SOURCE_TIMEOUT_MS = 12000;
 
-  /* ---------- match mode ---------- */
-  .matchrow {
-    display: flex; gap: 18px; flex-wrap: wrap; align-items: baseline;
-    margin-bottom: 14px; padding: 8px 14px;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-  }
-  .match-opt { display: inline-flex; align-items: baseline; gap: 6px; font-size: 13.5px; color: var(--muted); cursor: pointer; user-select: none; }
-  .match-opt input { accent-color: var(--accent); }
-  .match-opt .sub { font-size: 12px; color: var(--faint); }
-  .match-opt:has(input:checked) { color: var(--ink); }
-
-  /* ---------- 热门搜索 ---------- */
-  .hot-panel {
-    margin-bottom: 14px; padding: 10px 14px;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-  }
-  .hot-panel .label { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-  .hot-panel .tags { display: flex; flex-wrap: wrap; gap: 8px; }
-  .hot-tag {
-    display: inline-block; padding: 4px 11px; border: 1px solid var(--line); border-radius: 999px;
-    background: var(--panel-2); color: var(--muted); font-size: 12.5px; cursor: pointer;
-    user-select: none; text-decoration: none;
-  }
-  .hot-tag:hover { color: var(--ink); border-color: var(--accent); }
-
-  /* ---------- toolbar: swarm bar + controls ---------- */
-  .toolbar {
-    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
-    margin-bottom: 14px; padding: 12px 14px;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-  }
-  .swarm { flex: 1 1 260px; min-width: 0; }
-  .swarm-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
-  .swarm-bar { display: flex; gap: 3px; height: 24px; }
-  .seg {
-    display: flex; align-items: center; justify-content: center; gap: 6px;
-    border-radius: 5px; color: #fff; font-size: 12px; font-weight: 700;
-    min-width: 34px; cursor: pointer; padding: 0 8px;
-    transition: filter .12s;
-  }
-  .seg[data-n="0"] { display: none; }
-  .seg:hover { filter: brightness(1.12); }
-  .seg[data-f="alive"] { background: var(--seed); }
-  .seg[data-f="weak"]  { background: var(--weak); }
-  .seg[data-f="dead"]  { background: var(--dead); }
-  .seg.off { filter: grayscale(1) opacity(.45); }
-  .seg-label { font-weight: 500; opacity: .9; }
-  .seg-count { }
-
-  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .mini { font-size: 13px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
-  .mini input[type="number"] {
-    width: 58px; background: var(--panel-2); color: var(--ink);
-    border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font-size: 13px;
-  }
-  .count {
-    flex: 1 0 100%; display: flex; align-items: center; justify-content: space-between;
-    gap: 12px; flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--line);
-    font-size: 13px; color: var(--muted);
-  }
-  .count b { color: var(--ink); font-weight: 650; }
-  .result-stats { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  .selection-count { padding: 4px 9px; border-radius: 5px; background: var(--panel-2); }
-  .selection-count.has-selection { background: var(--sel); color: var(--accent); }
-  .batch-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-  .batch-btn {
-    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
-    min-height: 38px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 7px;
-    background: var(--panel-2); color: var(--ink); font-size: 13px; font-weight: 600;
-  }
-  .batch-btn svg { width: 16px; height: 16px; flex: none; }
-  .batch-btn:hover:not(:disabled) { border-color: var(--accent); background: var(--sel); }
-  .batch-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .batch-btn.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
-  .batch-btn:disabled { opacity: .45; cursor: not-allowed; }
-  .batch-btn:focus-visible { outline-offset: 3px; }
-  .qb-report {
-    margin: 0 0 14px; padding: 14px; background: var(--panel); border: 1px solid var(--line);
-    border-left: 4px solid var(--accent); border-radius: 8px; overflow-wrap: anywhere;
-  }
-  .qb-report[data-kind="bad"] { border-left-color: var(--dead); }
-  .qb-report[data-kind="warning"] { border-left-color: var(--weak); }
-  .qb-report[data-kind="ok"] { border-left-color: var(--seed); }
-  .qb-report p { margin: 5px 0; color: var(--muted); }
-  .qb-report summary { cursor: pointer; padding: 6px 0; color: var(--accent); }
-  .qb-report ul { margin: 4px 0 0; padding-left: 22px; max-height: 260px; overflow: auto; }
-  .qb-report li { padding: 5px 0; }
-  @media (max-width: 640px) {
-    .toolbar .controls { width: 100%; justify-content: space-between; }
-    .batch-actions { width: 100%; }
-    .batch-btn { flex: 1 1 auto; min-height: 42px; }
-    .batch-btn.primary { flex-basis: 100%; }
-  }
-
-  /* ---------- table ---------- */
-  .tblwrap {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-    overflow: auto; max-height: 72vh;
-  }
-  table { border-collapse: collapse; width: 100%; min-width: 900px; }
-  thead th {
-    position: sticky; top: 0; z-index: 2;
-    background: var(--panel-2); text-align: left;
-    font-size: 12px; font-weight: 600; color: var(--muted);
-    padding: 9px 12px; border-bottom: 1px solid var(--line); white-space: nowrap;
-    user-select: none;
-  }
-  thead th.sortable { cursor: pointer; }
-  thead th.sortable:hover { color: var(--ink); }
-  thead th .dir { color: var(--accent); }
-  tbody td { padding: 7px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
-  tbody tr:hover { background: var(--sel); }
-  tbody tr.sel { background: var(--sel); }
-  tbody tr:last-child td { border-bottom: 0; }
-  .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .seed-num { font-weight: 700; }
-  .seed-num.s-alive { color: var(--seed); }
-  .seed-num.s-weak  { color: var(--weak); }
-  .seed-num.s-dead  { color: var(--dead); }
-  .seed-num.s-unknown { color: var(--faint); font-weight: 500; }
-  .td-size { color: var(--muted); font-variant-numeric: tabular-nums; }
-  .td-src { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
-  .title-cell {
-    font-size: 13px; max-width: 460px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .title-cell a { color: var(--ink); text-decoration: none; cursor: pointer; }
-  .title-cell a:hover { color: var(--accent); }
-  .title-cell mark { background: var(--sel); color: var(--accent); border-radius: 2px; }
-
-  .dlbtn {
-    border: 1px solid var(--line); background: var(--panel-2); color: var(--muted);
-    border-radius: 6px; padding: 2px 8px; font-size: 12px; cursor: pointer;
-    font-family: inherit; line-height: 1.6;
-  }
-  .dlbtn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-  .dlbtn:disabled { opacity: .5; cursor: default; }
-  .dlbtn.ok { border-color: var(--seed); color: var(--seed); }
-  .dlbtn.bad { border-color: var(--dead); color: var(--dead); }
-  .op { white-space: nowrap; }
-  .op > * { margin-left: 6px; }
-
-  .gear {
-    border: 1px solid var(--line); background: var(--panel-2); color: var(--muted);
-    border-radius: 8px; padding: 4px 10px; font-size: 12.5px; cursor: pointer;
-    font-family: inherit;
-  }
-  .gear:hover { border-color: var(--accent); color: var(--accent); }
-  .gear .qbdot { color: var(--faint); }
-  .gear .qbdot.on { color: var(--seed); }
-
-  dialog.settings {
-    border: 1px solid var(--line); border-radius: 12px; padding: 0;
-    background: var(--panel); color: var(--ink); max-width: 480px; width: calc(100% - 32px);
-  }
-  dialog.settings::backdrop { background: rgba(0,0,0,.5); }
-  .settings h3 { margin: 0; padding: 14px 18px; border-bottom: 1px solid var(--line); font-size: 15px; }
-  .settings .body { padding: 16px 18px; display: grid; gap: 12px; }
-  .settings label { display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); }
-  .settings input {
-    background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px;
-    padding: 7px 10px; color: var(--ink); font: inherit; font-size: 13px;
-  }
-  .settings input:focus { border-color: var(--accent); outline: none; }
-  .settings .hint { font-size: 11.5px; color: var(--faint); line-height: 1.55; }
-  .settings .foot {
-    display: flex; gap: 8px; align-items: center; justify-content: flex-end;
-    padding: 12px 18px; border-top: 1px solid var(--line);
-  }
-  .settings .foot .msg { margin-right: auto; font-size: 12px; line-height: 1.5; }
-  .settings .foot .msg.ok { color: var(--seed); }
-  .settings .foot .msg.bad { color: var(--dead); }
-  .settings .foot button {
-    border-radius: 7px; padding: 6px 14px; font: inherit; font-size: 13px; cursor: pointer;
-    border: 1px solid var(--line); background: var(--panel-2); color: var(--ink);
-  }
-  .settings .foot button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .title-cell .hash { color: var(--faint); font-size: 11px; margin-left: 8px; }
-  .td-date { color: var(--faint); font-size: 12.5px; white-space: nowrap; }
-  th.cb, td.cb { width: 34px; padding-right: 2px; }
-  .cb input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
-  td.op { width: 30px; text-align: center; }
-  .copybtn {
-    background: none; border: 0; color: var(--faint); font-size: 14px; opacity: 0;
-    transition: opacity .1s;
-  }
-  tr:hover .copybtn, tr.sel .copybtn { opacity: 1; }
-  .copybtn:hover { color: var(--accent); }
-
-  /* ---------- progress ---------- */
-  .progress {
-    display: none; margin-bottom: 14px; padding: 12px 14px;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-    font-size: 13px;
-  }
-  .progress.show { display: block; }
-  .progress .line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; line-height: 1.9; }
-  .progress .spinner {
-    width: 14px; height: 14px; border-radius: 50%;
-    border: 2px solid var(--line); border-top-color: var(--accent);
-    animation: spin .8s linear infinite; flex: none;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .progress .src-ok { color: var(--ink); }
-  .progress .src-bad { color: var(--dead); }
-  .progress .note { color: var(--muted); font-size: 12px; }
-
-  /* ---------- empty / error ---------- */
-  .empty { padding: 60px 20px; text-align: center; color: var(--muted); }
-  .empty .big { font-size: 15px; margin-bottom: 6px; }
-  .empty .hint { font-size: 13px; color: var(--faint); }
-  .empty code { background: var(--panel-2); padding: 2px 6px; border-radius: 4px; font-family: ui-monospace, monospace; }
-  .empty .retry {
-    margin-top: 12px; border: 1px solid var(--line); background: var(--panel-2); color: var(--ink);
-    border-radius: 7px; padding: 6px 16px; font: inherit; font-size: 13px; cursor: pointer;
-  }
-  .empty .retry:hover { border-color: var(--accent); color: var(--accent); }
-
-  /* ---------- toast ---------- */
-  .toast {
-    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-    background: var(--ink); color: var(--bg); padding: 8px 16px; border-radius: 8px;
-    font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .15s;
-    z-index: 10; white-space: nowrap;
-  }
-  .toast.show { opacity: 1; }
-
-  .footnote { margin-top: 20px; font-size: 12px; color: var(--faint); text-align: center; }
-
-  @media (prefers-reduced-motion: reduce) {
-    .progress .spinner { animation: none; }
-    * { transition: none !important; }
-  }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="brand">
-    <h1>磁力搜索</h1>
-    <span class="sub" id="brandSub">本地版 · 15 个磁力站聚合 · 右键源标签可跳转源站</span>
-  </div>
-
-  <form class="searchbar" id="searchForm">
-    <input id="query" type="search" placeholder="输入关键词，如 adn-666" autocomplete="off" spellcheck="false" autofocus>
-    <button id="go" type="submit">搜索</button>
-  </form>
-
-  <div class="chips" id="chips"></div>
-
-  <div class="matchrow">
-    <label class="match-opt">
-      <input type="radio" name="match" id="matchSmart" value="smart" checked>
-      智能 <span class="sub">关键词出现在标题里即可</span>
-    </label>
-    <label class="match-opt">
-      <input type="radio" name="match" id="matchExact" value="exact">
-      完全 <span class="sub">从标题开头连续对上</span>
-    </label>
-  </div>
-
-  <div class="hot-panel" id="hotPanel">
-    <div class="label">热 门 搜 索 · 豆瓣一周口碑榜（点击即搜）</div>
-    <div class="tags" id="hotTags">
-      <a class="hot-tag" href="javascript:void(0)" data-q="杀死比尔：血色全传">杀死比尔：血色全传</a>
-      <a class="hot-tag" href="javascript:void(0)" data-q="欢迎来龙餐馆">欢迎来龙餐馆</a>
-      <a class="hot-tag" href="javascript:void(0)" data-q="我想留在你身边">我想留在你身边</a>
-      <a class="hot-tag" href="javascript:void(0)" data-q="奥德赛">奥德赛</a>
-      <a class="hot-tag" href="javascript:void(0)" data-q="空枪">空枪</a>
-      <a class="hot-tag" href="javascript:void(0)" data-q="坠落2：死点">坠落2：死点</a>
-      <a class="hot-tag" href="javascript:void(0)" data-q="燃烧吧！爸爸">燃烧吧！爸爸</a>
-      <a class="hot-tag" href="javascript:void(0)" data-q="肖申克的救赎">肖申克的救赎</a>
-      <a class="hot-tag" href="javascript:void(0)" data-q="蜘蛛侠：崭新之日">蜘蛛侠：崭新之日</a>
-      <a class="hot-tag" href="javascript:void(0)" data-q="复仇者联盟4：终局之战">复仇者联盟4：终局之战</a>
-    </div>
-  </div>
-
-  <div class="toolbar">
-    <div class="swarm">
-      <div class="swarm-label">种子存活 — 点一段只看这类（无种子数据的源不参与统计）</div>
-      <div class="swarm-bar" id="swarmBar"></div>
-    </div>
-    <div class="controls">
-      <label class="mini">至少 <input id="minSeeds" type="number" min="0" value="0"> 种子</label>
-      <button class="gear" id="qbGear" title="配置 qBittorrent 连接">
-        <span class="qbdot" id="qbDot">●</span> qBittorrent 设置
-      </button>
-      <button class="gear" id="srcUpdateBtn" title="从发布页拉取各源最新可用域名">更新搜索源</button>
-    </div>
-    <div class="count" id="count"></div>
-  </div>
-
-  <section class="qb-report" id="qbReport" hidden tabindex="-1" aria-label="qBittorrent 发送结果">
-    <div id="qbReportStatus" role="status" aria-live="polite" aria-atomic="true"></div>
-    <details id="qbReportDetails" hidden>
-      <summary>查看逐条结果</summary>
-      <ul id="qbReportItems"></ul>
-    </details>
-  </section>
-
-  <dialog class="settings" id="qbDialog">
-    <h3>qBittorrent 连接</h3>
-    <div class="body">
-      <label>
-        WebUI 地址
-        <input id="qbUrl" type="text" placeholder="http://127.0.0.1:8080" spellcheck="false">
-      </label>
-      <label>
-        用户名 <span class="hint">开了「对本机跳过认证」就留空</span>
-        <input id="qbUser" type="text" autocomplete="off" spellcheck="false">
-      </label>
-      <label>
-        密码 <span class="hint"></span>
-        <input id="qbPass" type="password" autocomplete="new-password">
-      </label>
-      <label>
-        保存路径 <span class="hint">留空则用 qBittorrent 的默认下载目录</span>
-        <input id="qbPath" type="text" placeholder="D:\Downloads" spellcheck="false">
-      </label>
-      <label>
-        分类 <span class="hint">可选，对应 qBittorrent 里已建好的分类</span>
-        <input id="qbCat" type="text" spellcheck="false">
-      </label>
-      <div class="hint">
-        地址填 qBittorrent「选项 → Web UI」里的地址和端口。
-        用户名密码保存在本机浏览器 localStorage，不会上传；发送走本机后端转发。
-      </div>
-    </div>
-    <div class="foot">
-      <span class="msg" id="qbMsg"></span>
-      <button id="qbClose">关闭</button>
-      <button class="primary" id="qbSave">保存</button>
-    </div>
-  </dialog>
-
-  <div class="progress" id="progress"></div>
-
-  <div class="tblwrap" id="tblwrap" hidden>
-    <table>
-      <thead id="thead"></thead>
-      <tbody id="tbody"></tbody>
-    </table>
-  </div>
-
-  <div class="empty" id="empty">
-    <div class="big">还没有结果</div>
-    <div class="hint">输入一个名字开始，例如 <code>adn-666</code>。标题须包含全部关键词。</div>
-  </div>
-
-  <div class="footnote">免责声明 · 本站仅聚合第三方搜索结果，不存储任何资源</div>
-</div>
-
-<div class="toast" id="toast"></div>
-
-<script>
-'use strict';
-
-/* ================= 源定义（15 源，含 1337x） ================= */
-const SOURCES = [
-  { id: '0magnet',   label: 'ØMagnet' },
-  { id: 'xiaocao',   label: '小草磁力' },
-  { id: 'juniorter', label: 'Juniorter' },
-  { id: 'cilibaike', label: '磁力百科' },
-  { id: 'knaben',    label: 'Knaben' },
-  { id: 'yuhuage',   label: '雨花阁' },
-  { id: 'hufeng',    label: '虎风' },
-  { id: 'cctv10',    label: 'U3C3' },
-  { id: 'cilimao',   label: '磁力猫' },
-  { id: 'ciliso',    label: '磁力搜' },
-  { id: 'x1337x',    label: '1337x' },
-  { id: 'taocili',   label: '淘磁力' },
-  { id: 'tpb',       label: 'TPB' },
-  { id: 'piratebay', label: '海盗湾HTML' },
-  { id: 'therarbg',  label: 'RARBG' },
-  { id: 'eztv',      label: 'EZTV' },
-  { id: 'btfox',     label: 'BtFox' },
-  { id: 'zhongziba', label: '种子吧' },
-  { id: 'cilichi',   label: '磁力池' },
-  { id: 'bitsearch', label: 'Bitsearch' },
-];
-const DEFAULT_SOURCES = ['0magnet'];
-const API_BASE = '';
-
-// 源站点主页（右键源标签跳转；后端返回 sourceSites 时优先用后端的）
-const sourceSites = {
-  '0magnet': 'https://0magnet.com',
-  'juniorter': 'https://torrent.juniorter.in',
-  'knaben': 'https://knaben.xyz',
-  'cctv10': 'https://cctv10.net',
-  'taocili': 'https://taocili9.shop',
-  'tpb': 'https://thepiratebay.org',
-  'piratebay': 'https://piratebayproxy.info',
-  'therarbg': 'https://therarbg.com',
-  'eztv': 'https://eztvx.to',
-  'btfox': 'https://btfox.xyz',
-  'zhongziba': 'https://seed8.org',
-  'cilichi': 'https://cilichi.com',
-  'bitsearch': 'https://bitsearch.to',
-  'x1337x': 'https://1337x.to',
-  'xiaocao': 'https://xc123.org',
-  'cilibaike': 'https://cilibaike.net',
-  'yuhuage': 'https://yuhuage.top',
-  'hufeng': 'https://hufeng.io',
-  'cilimao': 'https://cilimao.top',
-  'ciliso': 'https://www.ciliso.com',
-};
-
-/* ================= qBittorrent（本地后端 /api/qb 转发） ================= */
-const QB_STORAGE_KEY = 'qb_config';
-const QB_DEFAULT = { url: 'https://127.0.0.1:8080', user: '', pass: '', path: '', cat: '' };
-let qbConfig = { ...QB_DEFAULT };
-
-function loadQbConfig() {
-  try {
-    const raw = localStorage.getItem(QB_STORAGE_KEY);
-    if (raw) qbConfig = { ...QB_DEFAULT, ...JSON.parse(raw) };
-  } catch (e) { /* 忽略 */ }
-  $('#qbDot').classList.toggle('on', !!(qbConfig.url && qbConfig.user));
-}
-function saveQbConfig() {
-  localStorage.setItem(QB_STORAGE_KEY, JSON.stringify(qbConfig));
-  $('#qbDot').classList.toggle('on', !!(qbConfig.url && qbConfig.user));
+function buildTasks(query, page, sort, waitUntil) {
+  const tasks = [];
+  const push = (name, promise, timeoutMs) => {
+    // 防 unhandled rejection 崩进程：未选中/失败的任务 rejection 也必须被消费
+    promise.catch(() => {});
+    tasks.push({ name, promise, timeoutMs });
+  };
+  if (ALL_SOURCE_IDS.includes('0magnet'))    push('0magnet', fetchFrom0Magnet(query, sort, page, waitUntil));
+  if (ALL_SOURCE_IDS.includes('xiaocao'))    push('xiaocao', fetchFromXiaocao(query, page, sort, waitUntil));
+  if (ALL_SOURCE_IDS.includes('juniorter'))  push('juniorter', fetchFromJuniorter(query, page, sort, waitUntil));
+  if (ALL_SOURCE_IDS.includes('cilibaike'))  push('cilibaike', fetchFromCilibaike(query, page, sort, waitUntil, 'cilibaike'));
+  if (ALL_SOURCE_IDS.includes('knaben'))     push('knaben', fetchFromKnaben(query, page, sort, waitUntil));
+  if (ALL_SOURCE_IDS.includes('yuhuage'))    push('yuhuage', fetchFromYuhuage(query, page, sort, waitUntil));
+  if (ALL_SOURCE_IDS.includes('hufeng'))     push('hufeng', fetchFromHufeng(query, page, sort, waitUntil));
+  if (ALL_SOURCE_IDS.includes('cctv10'))     push('cctv10', fetchFromCctv10(query, page, sort, waitUntil));
+  if (ALL_SOURCE_IDS.includes('cilimao'))    push('cilimao', fetchFromCilimao(query, page, sort, waitUntil));
+  if (ALL_SOURCE_IDS.includes('ciliso'))     push('ciliso', fetchFromCilibaike(query, page, sort, waitUntil, 'ciliso'));
+  if (ALL_SOURCE_IDS.includes('x1337x'))     push('x1337x', fetchFromX1337x(query, page, sort, waitUntil), 25000); // 需翻页找精确匹配，放宽到 25s
+  if (ALL_SOURCE_IDS.includes('taocili'))    push('taocili', fetchFromTaocili(query, page, sort, waitUntil));
+  if (ALL_SOURCE_IDS.includes('tpb'))      push('tpb', fetchFromTpb(query, page, sort, waitUntil));
+  if (ALL_SOURCE_IDS.includes('piratebay')) push('piratebay', fetchFromPiratebay(query, page, sort, waitUntil));
+  if (ALL_SOURCE_IDS.includes('therarbg')) push('therarbg', fetchFromTherarbg(query, page, sort, waitUntil));
+  if (ALL_SOURCE_IDS.includes('eztv'))     push('eztv', fetchFromEztvSmart(query, page, sort, waitUntil));
+  if (ALL_SOURCE_IDS.includes('btfox'))    push('btfox', fetchFromBtfox(query, page, sort, waitUntil));
+  if (ALL_SOURCE_IDS.includes('zhongziba')) push('zhongziba', fetchFromZhongziba(query, page, sort, waitUntil));
+  if (ALL_SOURCE_IDS.includes('cilichi'))   push('cilichi', fetchFromCilichi(query, page, sort, waitUntil));
+  if (ALL_SOURCE_IDS.includes('bitsearch')) push('bitsearch', fetchFromBitsearch(query, page, sort, waitUntil));
+  return tasks;
 }
 
-/* ================= 状态 ================= */
-const state = {
-  running: false,
-  rows: [],            // 表格行（已映射）
-  order: [],           // 排序后 index
-  selected: new Set(),
-  sortKey: 'seeds',
-  sortDir: -1,
-  aliveFilter: null,
-  minSeeds: 0,
-  matchMode: 'smart',
-  clientFilter: '',
-};
-
-const $ = (s) => document.querySelector(s);
-const fmtSize = (b) => {
-  if (!b) return '-';
-  const u = ['B','KB','MB','GB','TB']; let v = b, i = 0;
-  while (v >= 1024 && i < u.length-1) { v /= 1024; i++; }
-  return (v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)) + ' ' + u[i];
-};
-const fmtDate = (d) => (d || '').slice(0, 10);
-const rowId = (it) => it.hash || ('t:' + (it.title || '').toLowerCase());
-const aliveClass = (s) => (s >= 5 ? 's-alive' : s >= 1 ? 's-weak' : 's-dead');
-const aliveBucket = (s) => (s >= 5 ? 'alive' : s >= 1 ? 'weak' : 'dead');
-
-/* ---------- 数据映射：后端 item → 表格行 ---------- */
-function seedNum(it) {
-  const raw = it && it.seeds;
-  if (raw === undefined || raw === null || raw === '') return -1;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) ? n : -1;
+// 只跑指定源（按用户勾选），保持与历史一致的源顺序
+function selectTasks(allTasks, sources) {
+  const want = new Set(sources);
+  return ALL_SOURCE_IDS.filter((id) => want.has(id))
+    .map((id) => allTasks.find((t) => t.name === id))
+    .filter(Boolean);
 }
-function itemKey(it) {
-  const m = it && it.magnet && it.magnet.match(/btih:([a-zA-Z0-9]{32,40})/);
-  return m ? ('h:' + m[1].toLowerCase()) : ('n:' + ((it && it.name) || ''));
+
+function withSourceTimeout(promise, ms, label) {
+  let timer = null;
+  const failure = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} 响应超时（>${ms}ms），已跳过该源`)), ms);
+  });
+  return Promise.race([promise, failure]).finally(() => { if (timer) clearTimeout(timer); });
 }
-function toRow(it) {
-  const m = (it.magnet || '').match(/btih:([a-zA-Z0-9]{32,40})/i);
+
+function dedupItems(allItems) {
+  const seen = new Set();
+  const deduped = [];
+  for (const item of allItems) {
+    const hashMatch = item.magnet && item.magnet.match(/btih:([a-zA-Z0-9]{32,40})/);
+    const key = hashMatch ? hashMatch[1].toLowerCase() : item.name;
+    if (!seen.has(key)) { seen.add(key); deduped.push(item); }
+  }
+  return deduped;
+}
+
+/**
+ * 并发跑所有源：
+ *  - Promise.allSettled 语义：任一源失败/超时不影响其它源；
+ *  - 每个源独立硬超时（PER_SOURCE_TIMEOUT_MS），慢源绝不拖整体；
+ *  - 某源一结束就回调 onSource(ev)，供前端“谁先返回谁先显示”；
+ * 返回最终去重后的聚合结果（供一次性 JSON 与流式 done 事件共用）。
+ */
+export async function runSearch({
+  query, page = 1, sort = 'relevance', sources = ALL_SOURCE_IDS,
+  waitUntil = null, onSource = null, timeoutMs = PER_SOURCE_TIMEOUT_MS,
+}) {
+  if (!query) throw new Error('Missing query');
+  CCTV10_DEBUG = {};
+  CILIMAO_DEBUG = {};
+  const startTime = Date.now();
+
+  const allTasks = buildTasks(query, page, sort, waitUntil);
+  const tasks = selectTasks(allTasks, sources);
+
+  const wrapped = tasks.map((t) => {
+    const t0 = Date.now();
+    const per = t.timeoutMs || timeoutMs;
+    return withSourceTimeout(t.promise, per, t.name)
+      .then((items) => {
+        const value = Array.isArray(items) ? items : [];
+        if (typeof onSource === 'function') {
+          onSource({ event: 'source', name: t.name, ok: true, count: value.length, items: value, ms: Date.now() - t0 });
+        }
+        return { name: t.name, ok: true, value };
+      })
+      .catch((err) => {
+        const reason = String((err && err.message) || err);
+        console.error(`${t.name} failed:`, err);
+        if (typeof onSource === 'function') {
+          onSource({ event: 'source', name: t.name, ok: false, count: 0, items: [], error: reason, ms: Date.now() - t0 });
+        }
+        return { name: t.name, ok: false, reason };
+      });
+  });
+
+  const outcomes = await Promise.all(wrapped);
+
+  const allItems = [];
+  const debug = {};
+  for (const r of outcomes) {
+    if (r.ok) {
+      allItems.push(...r.value);
+      debug[`${r.name}Status`] = 'fulfilled';
+      debug[`${r.name}Count`] = r.value.length;
+    } else {
+      debug[`${r.name}Status`] = 'rejected';
+      debug[`${r.name}Count`] = 0;
+      debug[`${r.name}Error`] = r.reason;
+    }
+  }
+
+  const deduped = dedupItems(allItems);
   return {
-    title: it.name || '',
-    magnet: it.magnet || '',
-    hash: m ? m[1].toLowerCase() : '',
-    seeders: seedNum(it),
-    leechers: parseInt(it.peers, 10) || 0,
-    size: it.size || '',
-    date: it.date || '',
-    source: it.source || '',
-    detailUrl: it.detailUrl || '',
+    results: deduped,
+    total: deduped.length,
+    totalBeforeDedup: allItems.length,
+    timing: Date.now() - startTime,
+    sources: tasks.map((t) => t.name),
+    sourceOutcomes: outcomes,
+    debug,
   };
 }
-function rowsFromItems(items) {
-  const seen = new Set();
-  const out = [];
-  for (const it of items) {
-    const k = itemKey(it);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(toRow(it));
-  }
-  return out;
-}
-function parseSizeBytes(str) {
-  if (!str) return 0;
-  if (typeof str === 'number') return str;
-  const m = String(str).trim().match(/^([\d.]+)\s*(B|KB|MB|GB|TB)$/i);
-  if (!m) return 0;
-  const u = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4 };
-  return parseFloat(m[1]) * (u[m[2].toUpperCase()] || 1);
-}
 
-/* ---------- source chips ---------- */
-const selectedSources = new Set(DEFAULT_SOURCES);
-function buildChips() {
-  $('#chips').replaceChildren();
-  for (const s of SOURCES) {
-    const el = document.createElement('label');
-    el.className = 'chip';
-    el.dataset.id = s.id;
-    if (selectedSources.has(s.id)) el.dataset.on = '';
-    el.innerHTML = '<span class="dot"></span>' + s.label;
-    el.title = '左键切换勾选 · 右键跳转源站点';
-    el.addEventListener('click', () => {
-      if (selectedSources.has(s.id)) { selectedSources.delete(s.id); }
-      else { selectedSources.add(s.id); }
-      el.toggleAttribute('data-on');
-      if (currentQuery) {
-        const srcs = getSelectedSources();
-        if (srcs.length === 0) showEmptySourceHint();
-        else if (!tryInstantSwitch()) doSearch(currentQuery, 1);
-      }
-    });
-    el.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      const site = sourceSites[s.id];
-      if (site) window.open(site, '_blank', 'noopener');
-      else toast(s.label + '：暂无站点链接');
-    });
-    $('#chips').appendChild(el);
-  }
-}
-function getSelectedSources() {
-  return SOURCES.filter(s => selectedSources.has(s.id)).map(s => s.id);
-}
+// 兼容 Cloudflare Pages / 旧调用方：一次性聚合成 JSON（本地 server 默认走流式 /api/search?stream=1）
+export async function onRequest(context) {
+  const { request, waitUntil } = context;
+  const url = new URL(request.url);
+  const query = url.searchParams.get('q');
+  const page = parseInt(url.searchParams.get('page') || '1', 10);
+  const sort = url.searchParams.get('sort') || 'relevance';
+  const sources = (url.searchParams.get('sources') || ALL_SOURCE_IDS.join(','))
+    .split(',').map((s) => s.trim()).filter(Boolean);
 
-/* ---------- swarm bar ---------- */
-function buildSwarm() {
-  const bar = $('#swarmBar');
-  bar.replaceChildren();
-  const buckets = { alive: 0, weak: 0, dead: 0 };
-  for (const r of state.rows) {
-    if (r.seeders < 0) continue; // 无种子数据不参与分桶
-    buckets[aliveBucket(r.seeders)]++;
-  }
-  const label = { alive: '活', weak: '弱', dead: '死' };
-  for (const key of ['alive', 'weak', 'dead']) {
-    const seg = document.createElement('button');
-    seg.className = 'seg';
-    seg.dataset.f = key;
-    seg.dataset.n = buckets[key];
-    if (state.aliveFilter === key) seg.classList.add('off');
-    seg.innerHTML = '<span class="seg-label">' + label[key] + '</span><span class="seg-count">' + buckets[key] + '</span>';
-    seg.style.flex = buckets[key] || 0.0001;
-    seg.title = label[key] + '：' + buckets[key] + ' 条，点一下只看这类';
-    seg.addEventListener('click', () => {
-      state.aliveFilter = state.aliveFilter === key ? null : key;
-      buildSwarm();
-      renderTable();
-    });
-    bar.appendChild(seg);
-  }
-  if (!state.rows.length) bar.innerHTML = '<span class="note" style="color:var(--faint);font-size:12px">—</span>';
-}
-
-/* ---------- table headers ---------- */
-const HEADS = [
-  { key: 'cb', label: '' },
-  { key: 'seeds', label: '种子', sortable: true, num: true },
-  { key: 'leech', label: '下载', num: true },
-  { key: 'size', label: '大小', sortable: true, num: true },
-  { key: 'src', label: '来源' },
-  { key: 'title', label: '标题', sortable: true },
-  { key: 'date', label: '发布', sortable: true },
-  { key: 'op', label: '' },
-];
-function buildHead() {
-  const tr = document.createElement('tr');
-  for (const h of HEADS) {
-    const th = document.createElement('th');
-    if (h.key === 'cb') {
-      th.className = 'cb';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.id = 'selectAll';
-      cb.title = '全选当前显示的结果';
-      cb.setAttribute('aria-label', '全选当前显示的结果');
-      cb.addEventListener('change', () => {
-        for (const i of state.order) {
-          const id = rowId(state.rows[i]);
-          cb.checked ? state.selected.add(id) : state.selected.delete(id);
-        }
-        renderTable();
-      });
-      th.appendChild(cb);
-    }
-    if (h.label) th.textContent = h.label;
-    if (h.num) th.classList.add('num');
-    if (h.sortable) {
-      th.classList.add('sortable');
-      th.dataset.key = h.key;
-      if (state.sortKey === h.key) {
-        const dir = document.createElement('span');
-        dir.className = 'dir';
-        dir.textContent = state.sortDir === -1 ? ' ↓' : ' ↑';
-        th.appendChild(dir);
-      }
-      th.addEventListener('click', () => {
-        if (state.sortKey === h.key) state.sortDir *= -1;
-        else { state.sortKey = h.key; state.sortDir = -1; }
-        buildHead();
-        renderTable();
-      });
-    }
-    tr.appendChild(th);
-  }
-  $('#thead').replaceChildren(tr);
-  updateSelectAll();
-}
-
-function updateSelectAll() {
-  const cb = $('#selectAll');
-  if (!cb) return;
-  const total = state.order.length;
-  const selected = state.order.filter((i) => state.selected.has(rowId(state.rows[i]))).length;
-  cb.checked = total > 0 && selected === total;
-  cb.indeterminate = selected > 0 && selected < total;
-  cb.disabled = total === 0;
-}
-
-/* ---------- filtering + sorting ---------- */
-function matchTitle(r) {
-  const q = currentQuery || '';
-  if (!q) return true;
-  const title = r.title.toLowerCase();
-  if (state.matchMode === 'exact') {
-    return title.startsWith(q.toLowerCase());
-  }
-  const tokens = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  return tokens.every((t) => title.includes(t));
-}
-function applyView() {
-  const tokens = state.clientFilter.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  let idx = [];
-  state.rows.forEach((r, i) => {
-    if (r.seeders >= 0 && r.seeders < state.minSeeds) return;      // 无种子数据不误伤
-    if (state.aliveFilter && r.seeders >= 0 && aliveBucket(r.seeders) !== state.aliveFilter) return;
-    if (!matchTitle(r)) return;
-    if (tokens.length) {
-      const t = r.title.toLowerCase();
-      if (!tokens.every((k) => t.includes(k))) return;
-    }
-    idx.push(i);
-  });
-  const dir = state.sortDir;
-  const cmp = {
-    seeds: (a, b) => a.seeders - b.seeders || b.leechers - a.leechers,
-    size: (a, b) => parseSizeBytes(a.size) - parseSizeBytes(b.size),
-    title: (a, b) => a.title.localeCompare(b.title, 'zh'),
-    date: (a, b) => String(b.date || '').localeCompare(String(a.date || '')),
-  }[state.sortKey] || ((a, b) => b.seeders - a.seeders);
-  idx.sort((x, y) => dir * cmp(state.rows[x], state.rows[y]));
-  state.order = idx;
-}
-
-/* ---------- render ---------- */
-function renderTable() {
-  applyView();
-  const tbody = $('#tbody');
-  tbody.replaceChildren();
-  const q = currentQuery || '';
-  for (const i of state.order) {
-    const r = state.rows[i];
-    const tr = document.createElement('tr');
-    const id = rowId(r);
-    if (state.selected.has(id)) tr.classList.add('sel');
-
-    // checkbox
-    const tdCb = document.createElement('td');
-    tdCb.className = 'cb';
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = state.selected.has(id);
-    cb.addEventListener('change', () => {
-      cb.checked ? state.selected.add(id) : state.selected.delete(id);
-      tr.classList.toggle('sel', cb.checked);
-      updateCount();
-    });
-    tdCb.appendChild(cb);
-    tr.appendChild(tdCb);
-
-    // seeds
-    const tdSeeds = document.createElement('td');
-    tdSeeds.className = 'num';
-    const seedEl = document.createElement('span');
-    if (r.seeders < 0) {
-      seedEl.className = 'seed-num s-unknown';
-      seedEl.textContent = '未知';
-    } else {
-      seedEl.className = 'seed-num ' + aliveClass(r.seeders);
-      seedEl.textContent = r.seeders;
-    }
-    tdSeeds.appendChild(seedEl);
-    tr.appendChild(tdSeeds);
-
-    // leechers
-    const tdLe = document.createElement('td');
-    tdLe.className = 'num';
-    tdLe.textContent = r.seeders < 0 ? '-' : (r.leechers || 0);
-    tr.appendChild(tdLe);
-
-    // size
-    const tdSize = document.createElement('td');
-    tdSize.className = 'num td-size';
-    tdSize.textContent = r.size || '-';
-    tr.appendChild(tdSize);
-
-    // source
-    const tdSrc = document.createElement('td');
-    tdSrc.className = 'td-src';
-    tdSrc.textContent = r.source || '-';
-    if (r.source) tdSrc.title = '当前种子数取自: ' + r.source;
-    tr.appendChild(tdSrc);
-
-    // title (click = copy magnet)
-    const tdTitle = document.createElement('td');
-    tdTitle.className = 'title-cell';
-    const a = document.createElement('a');
-    a.innerHTML = highlightKeyword(r.title, q);
-    a.title = '点击复制磁力';
-    if (r.magnet) {
-      a.addEventListener('click', async () => {
-        await copyText(r.magnet);
-        toast('已复制磁力');
-      });
-    } else if (r.detailUrl) {
-      a.style.cursor = 'pointer';
-      a.title = '点击获取磁力链接';
-      a.addEventListener('click', async () => {
-        if (a.dataset.loading) return;
-        a.dataset.loading = '1';
-        const orig = a.innerHTML;
-        a.innerHTML = '<span style="opacity:.5">获取磁力中…</span>';
-        try {
-          const resp = await fetch('/api/magnet?url=' + encodeURIComponent(r.detailUrl));
-          const data = await resp.json();
-          if (data.magnet) {
-            r.magnet = data.magnet;
-            const m = r.magnet.match(/btih:([a-zA-Z0-9]{32,40})/i);
-            if (m) r.hash = m[1].toLowerCase();
-            a.innerHTML = orig;
-            a.title = '点击复制磁力';
-            a.onclick = async () => { await copyText(r.magnet); toast('已复制磁力'); };
-            toast('已获取磁力链接');
-          } else {
-            a.innerHTML = orig;
-            a.title = '获取失败';
-            toast('获取磁力失败');
-          }
-        } catch (e) {
-          a.innerHTML = orig;
-          toast('网络错误');
-        } finally {
-          delete a.dataset.loading;
-        }
-      });
-    } else {
-      a.style.cursor = 'default';
-      a.title = '没有磁力链接';
-    }
-    tdTitle.appendChild(a);
-    if (r.hash) {
-      const h = document.createElement('span');
-      h.className = 'hash';
-      h.textContent = r.hash.slice(0, 12);
-      h.title = 'infohash: ' + r.hash;
-      tdTitle.appendChild(h);
-    }
-    tr.appendChild(tdTitle);
-
-    // date
-    const tdDate = document.createElement('td');
-    tdDate.className = 'td-date';
-    tdDate.textContent = fmtDate(r.date);
-    tr.appendChild(tdDate);
-
-    // op: 推送到 qBittorrent + 原页面链接
-    const tdOp = document.createElement('td');
-    tdOp.className = 'op';
-    if (r.magnet) {
-      const dl = document.createElement('a');
-      dl.className = 'dlbtn';
-      dl.textContent = '下载';
-      dl.href = r.magnet;
-      dl.title = '用本机默认下载工具打开此磁力链接（如 qBittorrent / 迅雷 / 比特彗星）';
-      dl.rel = 'noopener';
-      tdOp.appendChild(dl);
-    }
-    if (r.detailUrl) {
-      const d = document.createElement('a');
-      d.textContent = '↗';
-      d.title = '打开原页面';
-      d.href = r.detailUrl;
-      d.target = '_blank';
-      d.rel = 'noopener';
-      tdOp.appendChild(d);
-    }
-    tr.appendChild(tdOp);
-
-    tbody.appendChild(tr);
-  }
-  updateCount();
-}
-
-/* ---------- 推送到 qBittorrent ---------- */
-const qb = { sending: false, results: new Map() };
-
-function qbResultLabel(item) {
-  return item.ok === true ? '已添加' : (item.ok === false ? '发送失败' : '待确认');
-}
-function showQbReport(title, message, kind) {
-  const report = $('#qbReport');
-  report.hidden = false;
-  report.dataset.kind = kind;
-  const heading = document.createElement('strong');
-  heading.textContent = title;
-  const detail = document.createElement('p');
-  detail.textContent = message;
-  $('#qbReportStatus').replaceChildren(heading, detail);
-}
-async function pushToQb(magnets, btn) {
-  if (qb.sending) return;
-  const list = (magnets || []).filter(Boolean);
-  if (!list.length) return toast('没有可推送的磁力');
-  if (!qbConfig.url || !qbConfig.user) { openQbDialog(); return; }
-  const titles = new Map(state.rows.map((r) => [r.magnet, r.title]));
-  qb.sending = true;
-  renderTable();
-  showQbReport('正在发送 ' + list.length + ' 条任务…', '正在连接 qBittorrent 并添加任务，请稍候。', 'pending');
-  $('#qbReportDetails').hidden = true;
-  $('#qbReportItems').replaceChildren();
-  $('#qbReport').scrollIntoView({ block: 'nearest' });
-
-  let ok = 0, bad = 0;
-  try {
-    for (const magnet of list) {
-      let res;
-      try {
-        const r = await fetch(API_BASE + '/api/qb', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: qbConfig.url, user: qbConfig.user, pass: qbConfig.pass, savepath: qbConfig.path || '', category: qbConfig.cat || '', magnet }),
-        });
-        const j = await r.json();
-        res = { ok: !!(j && j.ok), message: (j && j.error) || '' };
-      } catch (e) {
-        res = { ok: false, message: e.message || '连接失败' };
-      }
-      qb.results.set(magnet, res);
-      if (res.ok) ok++; else bad++;
-      const li = document.createElement('li');
-      li.textContent = qbResultLabel(res) + ' — ' + (titles.get(magnet) || '') + (res.message ? '：' + res.message : '');
-      $('#qbReportItems').appendChild(li);
-    }
-    const summary = '新增 ' + ok + ' 条 · 失败 ' + bad + ' 条';
-    showQbReport(summary, '以下为本次发送结果。请到 qBittorrent 里确认任务状态。', bad ? 'warning' : 'ok');
-    $('#qbReportDetails').hidden = false;
-    $('#qbReportDetails').open = true;
-    toast(summary, 6000);
-  } catch (e) {
-    showQbReport('发送未完成', e.message, 'bad');
-    toast('发送未完成：' + e.message, 6000);
-  } finally {
-    qb.sending = false;
-    renderTable();
-  }
-}
-
-function qbMsg(text, cls) {
-  const el = $('#qbMsg');
-  el.textContent = text || '';
-  el.className = 'msg' + (cls ? ' ' + cls : '');
-}
-function openQbDialog() {
-  $('#qbUrl').value = qbConfig.url || '';
-  $('#qbUser').value = qbConfig.user || '';
-  $('#qbPass').value = '';
-  $('#qbPath').value = qbConfig.path || '';
-  $('#qbCat').value = qbConfig.cat || '';
-  qbMsg('');
-  $('#qbDialog').showModal();
-}
-function wireQbDialog() {
-  $('#qbGear').addEventListener('click', openQbDialog);
-  $('#qbClose').addEventListener('click', () => $('#qbDialog').close());
-  $('#qbSave').addEventListener('click', () => {
-    const url = $('#qbUrl').value.trim().replace(/\/+$/, '');
-    const user = $('#qbUser').value.trim();
-    const pass = $('#qbPass').value;
-    const path = $('#qbPath').value.trim();
-    const cat = $('#qbCat').value.trim();
-    if (!url) { qbMsg('请填写 WebUI 地址', 'bad'); return; }
-    if (!user) { qbMsg('请填写用户名（或开启免认证后仍可留空）', 'bad'); return; }
-    qbConfig = { url, user, pass, path, cat };
-    saveQbConfig();
-    qbMsg('已保存', 'ok');
-    setTimeout(() => $('#qbDialog').close(), 500);
-  });
-}
-
-function updateCount() {
-  updateSelectAll();
-  const sel = state.selected.size;
-  const total = state.rows.filter((r) => r.magnet).length;
-  const copyIcon = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4H4v12h4"/></svg>';
-  const sendIcon = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v12m-5-5 5 5 5-5M4 15v5h16v-5"/></svg>';
-  $('#count').innerHTML =
-    '<div class="result-stats"><span>显示 <b>' + state.order.length + '</b> / ' + state.rows.length +
-    ' 条</span><span class="selection-count' + (sel ? ' has-selection' : '') + '">已选 <b>' + sel + '</b> 条</span></div>' +
-    '<div class="batch-actions" role="group" aria-label="批量磁力操作">' +
-    '<button type="button" class="batch-btn" id="copySel" title="复制已勾选结果的磁力链接" ' + (sel ? '' : 'disabled') + '>' + copyIcon + '复制选中磁力</button>' +
-    '<button type="button" class="batch-btn" id="copyAll" title="复制全部搜索结果的磁力链接" ' + (total ? '' : 'disabled') + '>' + copyIcon + '复制全部（' + total + '）</button>' +
-    '<button type="button" class="batch-btn primary" id="qbSel" title="将已勾选结果发送到 qBittorrent" ' + (sel ? '' : 'disabled') + '>' + sendIcon + '发送选中到 qBittorrent</button></div>';
-  const qs = $('#qbSel');
-  if (qs) qs.disabled = !sel || qb.sending;
-  if (qs) {
-    if (qb.sending) qs.textContent = '正在发送…';
-    qs.addEventListener('click', () => {
-      const mags = state.rows.filter((r) => state.selected.has(rowId(r)) && r.magnet).map((r) => r.magnet);
-      pushToQb(mags, qs);
-    });
-  }
-  const cs = $('#copySel'), ca = $('#copyAll');
-  if (cs) cs.addEventListener('click', () => {
-    const mags = state.rows.filter((r) => state.selected.has(rowId(r)) && r.magnet).map((r) => r.magnet);
-    copyText(mags.join('\n')).then(() => toast('已复制 ' + mags.length + ' 条磁力'));
-  });
-  if (ca) ca.addEventListener('click', () => {
-    const mags = state.rows.filter((r) => r.magnet).map((r) => r.magnet);
-    copyText(mags.join('\n')).then(() => toast('已复制 ' + mags.length + ' 条磁力'));
-  });
-}
-
-/* ---------- progress ---------- */
-function showProgress(show) {
-  $('#progress').classList.toggle('show', show);
-  $('#go').classList.toggle('running', show);
-  $('#go').disabled = show;
-}
-function addProgressLine(text, kind) {
-  const p = $('#progress');
-  const line = document.createElement('div');
-  line.className = 'line';
-  const spinner = document.createElement('span');
-  spinner.className = 'spinner';
-  const msg = document.createElement('span');
-  msg.textContent = text;
-  if (kind === 'bad') msg.className = 'src-bad';
-  else if (kind === 'src') msg.className = 'src-ok';
-  else msg.className = 'note';
-  line.appendChild(spinner);
-  line.appendChild(msg);
-  p.appendChild(line);
-  p.scrollTop = p.scrollHeight;
-}
-
-/* ---------- empty states ---------- */
-function showEmpty() {
-  $('#tblwrap').hidden = true;
-  const empty = $('#empty');
-  empty.hidden = false;
-  empty.querySelector('.big').textContent = '没有找到匹配的结果';
-  empty.querySelector('.hint').innerHTML = '试试更短的关键词，或换一批源再搜。';
-}
-function showEmptySourceHint() {
-  $('#tblwrap').hidden = true;
-  state.rows = [];
-  state.order = [];
-  state.selected = new Set();
-  renderTable();
-  buildSwarm();
-  const empty = $('#empty');
-  empty.hidden = false;
-  empty.querySelector('.big').textContent = '🍃 请至少勾选一个源';
-  empty.querySelector('.hint').textContent = '在上方勾选想搜索的源即可继续';
-}
-function showSearchError() {
-  $('#tblwrap').hidden = true;
-  const empty = $('#empty');
-  empty.hidden = false;
-  empty.querySelector('.big').textContent = '⚠️ 数据源暂时不可用';
-  empty.querySelector('.hint').textContent = '请稍后重试，或换个关键词';
-}
-
-/* ================= 切源秒出：缓存 + 预取 + 缺失补齐 ================= */
-const resultCache = new Map();
-const CACHE_TTL = 5 * 60 * 1000;
-const cacheKeyFor = (q, sort) => `${q}||${sort}`;
-let pendingSearch = null;
-let prefetchingKey = null;
-let realRefreshing = false;
-let isLoading = false;
-
-function filterBySources(results, sources) {
-  if (!sources || sources.length === 0) return results;
-  const set = new Set(sources);
-  return results.filter((it) => set.has(it.source));
-}
-
-async function prefetchAllSources(query) {
-  const ck = cacheKeyFor(query, currentSort);
-  if (resultCache.has(ck)) return;
-  if (prefetchingKey === ck) return;
-  prefetchingKey = ck;
-  try {
-    const allSources = SOURCES.map((s) => s.id);
-    const url = `${API_BASE}/api/search?q=${encodeURIComponent(query)}&page=1&sort=${currentSort}&sources=${encodeURIComponent(allSources.join(','))}`;
-    const res = await fetch(url);
-    if (!res.ok) return;
-    const data = await res.json();
-    resultCache.set(ck, { data, ts: Date.now() });
-  } catch (e) { /* 预取失败静默 */ } finally {
-    if (prefetchingKey === ck) prefetchingKey = null;
-  }
-}
-
-function mergeIntoCache(query, data, sources) {
-  const ck = cacheKeyFor(query, currentSort);
-  const prev = resultCache.get(ck);
-  if (!prev) return;
-  const srcSet = new Set(sources);
-  const others = prev.data.results.filter((it) => !srcSet.has(it.source));
-  const merged = [...others, ...(data.results || [])];
-  resultCache.set(ck, { data: { ...prev.data, results: merged, total: merged.length }, ts: Date.now() });
-}
-
-async function refreshFromRealIfNeeded(query) {
-  if (isLoading || realRefreshing) return;
-  const ck = cacheKeyFor(query, currentSort);
-  const cached = resultCache.get(ck);
-  if (!cached) return;
-  const sources = getSelectedSources();
-  if (sources.length === 0) return;
-  const dbg = cached.data.debug || {};
-  const filtered = filterBySources(cached.data.results, sources);
-  const needReal = sources.some((src) => {
-    const cnt = Number(dbg[`${src}Count`]) || 0;
-    if (cnt <= 0) return false;
-    return filtered.filter((it) => it.source === src).length < cnt;
-  });
-  if (!needReal) return;
-  realRefreshing = true;
-  const srcsSnapshot = sources.join(',');
-  try {
-    const url = `${API_BASE}/api/search?q=${encodeURIComponent(query)}&page=1&sort=${currentSort}&sources=${encodeURIComponent(sources.join(','))}`;
-    const res = await fetch(url);
-    if (!res.ok) return;
-    const data = await res.json();
-    mergeIntoCache(query, data, sources);
-    if (getSelectedSources().join(',') === srcsSnapshot) {
-      renderCached(query);
-    }
-  } catch (e) { /* 修正失败静默 */ } finally {
-    realRefreshing = false;
-  }
-}
-
-// 把缓存结果（后端原始 item）映射为表格行并渲染
-function renderCached(query) {
-  const ck = cacheKeyFor(query, currentSort);
-  const cached = resultCache.get(ck);
-  if (!cached) return;
-  const sources = getSelectedSources();
-  const filtered = filterBySources(cached.data.results, sources);
-  state.rows = rowsFromItems(filtered);
-  state.selected = new Set();
-  state.aliveFilter = null;
-  $('#tblwrap').hidden = false;
-  $('#empty').hidden = true;
-  buildSwarm();
-  buildHead();
-  renderTable();
-}
-
-function tryInstantSearch(query) {
-  if (!query) return false;
-  const ck = cacheKeyFor(query, currentSort);
-  const cached = resultCache.get(ck);
-  if (!cached || Date.now() - cached.ts >= CACHE_TTL) return false;
-  const sources = getSelectedSources();
-  if (sources.length === 0) return false;
-  currentQuery = query;
-  currentPage = 1;
-  $('#hotPanel').style.display = 'none';
-  renderCached(query);
-  refreshFromRealIfNeeded(query);
-  return true;
-}
-const tryInstantSwitch = tryInstantSearch;
-
-/* ================= 流式搜索 ================= */
-let __searchSeq = 0;
-let currentQuery = '';
-let currentPage = 1;
-const currentSort = 'relevance';
-
-async function doSearch(query, page = 1) {
-  if (isLoading) {
-    pendingSearch = { query, page };
-    return;
-  }
-  const sources = getSelectedSources();
-  if (sources.length === 0) { showEmptySourceHint(); return; }
-
-  const mySeq = ++__searchSeq;
-  const stale = () => mySeq !== __searchSeq;
-
-  if (page === 1 && tryInstantSearch(query)) return;
-
-  isLoading = true;
-  currentQuery = query;
-  currentPage = page;
-  $('#hotPanel').style.display = 'none';
-
-  // 重置表格/进度
-  state.rows = [];
-  state.selected = new Set();
-  state.aliveFilter = null;
-  $('#tblwrap').hidden = true;
-  $('#empty').hidden = true;
-  $('#qbReport').hidden = true;
-  showProgress(true);
-  $('#progress').replaceChildren();
-  addProgressLine('搜索 ' + query + ' · ' + sources.length + ' 个源…');
-
-  const seen = new Set();
-  let doneSources = 0;
-  const failedSources = [];
-  let settled = false;
-
-  const finishStream = (payload) => {
-    if (settled) return;
-    settled = true;
-    if (state.rows.length === 0) {
-      showProgress(false);
-      if (failedSources.length >= sources.length) showSearchError();
-      else showEmpty();
-      return;
-    }
-    $('#tblwrap').hidden = false;
-    $('#empty').hidden = true;
-    buildSwarm();
-    buildHead();
-    renderTable();
-    addProgressLine('✅ 全部来源已完成 · 共 ' + state.rows.length + ' 条' + (payload && payload.timing ? '（' + payload.timing + ' ms）' : ''), 'note');
-  };
+  if (!query) return jsonResponse({ error: 'Missing query parameter' }, 400);
 
   try {
-    const url = `${API_BASE}/api/search?q=${encodeURIComponent(query)}&page=${page}&sort=${currentSort}&sources=${encodeURIComponent(sources.join(','))}&stream=1`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-
-    const ctype = res.headers.get('content-type') || '';
-    if (!(ctype.includes('ndjson') && res.body && res.body.getReader)) {
-      const data = await res.json();
-      if (stale()) return;
-      state.rows = rowsFromItems(data.results || []);
-      settled = true;
-      finishStream(data);
-      if (page === 1) {
-        mergeIntoCache(query, data, sources);
-        prefetchAllSources(query);
-      }
-      return;
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    let rafId = 0;
-
-    const flush = () => {
-      rafId = 0;
-      if (stale()) return;
-      $('#tblwrap').hidden = false;
-      $('#empty').hidden = true;
-      renderTable();
-    };
-    const scheduleFlush = () => { if (!rafId) rafId = requestAnimationFrame(flush); };
-
-    for (;;) {
-      const chunk = await reader.read();
-      if (stale()) { try { reader.cancel(); } catch (e) {} break; }
-      if (chunk.done) break;
-      buf += decoder.decode(chunk.value, { stream: true });
-      let nlIdx;
-      while ((nlIdx = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nlIdx).trim();
-        buf = buf.slice(nlIdx + 1);
-        if (!line) continue;
-        let ev;
-        try { ev = JSON.parse(line); } catch (e) { continue; }
-        if (ev.event === 'source') {
-          doneSources += 1;
-          if (ev.ok && Array.isArray(ev.items)) {
-            for (const it of ev.items) {
-              const k = itemKey(it);
-              if (seen.has(k)) continue;
-              seen.add(k);
-              state.rows.push(toRow(it));
-            }
-            addProgressLine('✔ ' + (ev.name || '?') + '：' + (ev.items.length || 0) + ' 条（' + doneSources + '/' + sources.length + '）', 'src');
-            scheduleFlush();
-          } else if (!ev.ok) {
-            failedSources.push({ name: ev.name, error: ev.error || '失败' });
-            addProgressLine('✘ ' + (ev.name || '?') + '：' + (ev.error || '失败') + '（' + doneSources + '/' + sources.length + '）', 'bad');
-          }
-        } else if (ev.event === 'done') {
-          finishStream(ev);
-        }
-      }
-    }
-    if (stale()) return;
-    if (!settled) finishStream({ ok: true, total: state.rows.length });
-    if (page === 1) prefetchAllSources(query);
+    const out = await runSearch({ query, page, sort, sources, waitUntil });
+    return jsonResponse({
+      results: out.results,
+      total: out.total,
+      timing: out.timing,
+      debug: {
+        sources: out.sources,
+        page,
+        totalBeforeDedup: out.totalBeforeDedup,
+        cctv10Raw: CCTV10_DEBUG,
+        cilimaoRaw: CILIMAO_DEBUG,
+        ...out.debug,
+      },
+    });
   } catch (err) {
-    if (stale() || err.name === 'AbortError') return;
-    console.error('搜索失败:', err);
-    if (state.rows.length === 0) showSearchError();
-    else addProgressLine('连接中断，以上为已收到的结果', 'bad');
-  } finally {
-    if (mySeq === __searchSeq) {
-      isLoading = false;
-      showProgress(false);
-      if (pendingSearch) {
-        const p = pendingSearch;
-        pendingSearch = null;
-        doSearch(p.query, p.page);
-      }
-    }
+    console.error('Search error:', err);
+    return jsonResponse({ error: 'Search failed', detail: String(err), cctv10Raw: CCTV10_DEBUG, cilimaoRaw: CILIMAO_DEBUG }, 502);
   }
 }
 
-/* ---------- 工具函数 ---------- */
-function highlightKeyword(text, keyword) {
-  if (!keyword) return escapeHtml(text);
-  const escaped = escapeHtml(text);
-  const escapedKeyword = escapeRegExp(escapeHtml(keyword.trim()));
-  const regex = new RegExp('(' + escapedKeyword + ')', 'gi');
-  return escaped.replace(regex, '<mark>$1</mark>');
-}
-function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
-}
-function escapeAttr(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-function escapeRegExp(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-let toastTimer = 0;
-function toast(text, ms) {
-  const t = $('#toast');
-  t.textContent = text;
-  t.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), ms || 1800);
-}
-async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch (e) {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    ta.remove();
-  }
+function simplifyMagnet(magnet) {
+  if (!magnet) return '';
+  const match = magnet.match(/xt=urn:btih:([a-zA-Z0-9]{32,40})/i);
+  if (match) return `magnet:?xt=urn:btih:${match[1]}`;
+  return magnet;
 }
 
-/* ---------- 热门搜索：豆瓣一周口碑榜 ---------- */
-(async function loadHotTags() {
-  const hotTagsEl = $('#hotTags');
-  if (!hotTagsEl) return;
-  try {
-    const res = await fetch(API_BASE + '/api/douban-weekly?limit=10', { cache: 'no-store' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const json = await res.json();
-    const list = (json && json.data) || [];
-    if (!list.length) return;
-    hotTagsEl.replaceChildren();
-    list.forEach(item => {
-      const a = document.createElement('a');
-      a.className = 'hot-tag';
-      a.href = 'javascript:void(0)';
-      a.dataset.q = item.title;
-      a.textContent = item.title;
-      a.addEventListener('click', () => {
-        $('#query').value = item.title;
-        doSearch(item.title, 1);
-      });
-      hotTagsEl.appendChild(a);
+function formatBytes(bytes) {
+  if (!bytes || bytes <= 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  const value = bytes / Math.pow(1024, i);
+  return `${value.toFixed(2)} ${units[i]}`;
+}
+
+// ========== 域名配置（由 domain_config.js 统一管理，支持在线更新） ==========
+function getDomainsConfig() {
+  return getDomains();
+}
+
+// ========== Knaben ==========
+async function fetchFromKnaben(query, page, sort, waitUntil) {
+  const size = 100;
+  const from = (page - 1) * size;
+
+  let orderBy = 'seeders';
+  switch (sort) {
+    case 'length': orderBy = 'bytes'; break;
+    case 'time':
+    case 'newest': orderBy = 'date'; break;
+    case 'requests': orderBy = 'peers'; break;
+    default: orderBy = 'seeders'; break;
+  }
+
+  const body = {
+    search_type: '100%',
+    search_field: 'title',
+    query: query,
+    order_by: orderBy,
+    order_direction: 'desc',
+    from: from,
+    size: size,
+    hide_unsafe: true,
+    hide_xxx: false,
+  };
+
+  const cacheKey = new Request(`https://knaben-cache.local/?q=${encodeURIComponent(query)}&page=${page}&sort=${sort}`, { method: 'GET' });
+  const cache = caches.default;
+
+  let response = await cache.match(cacheKey);
+  if (!response) {
+    response = await fetch(KNABEN_API, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+        'Origin': 'https://knaben.xyz',
+        'Referer': 'https://knaben.xyz/',
+      },
+      body: JSON.stringify(body),
     });
-  } catch (e) { /* 静默失败，保留兜底热词 */ }
-})();
 
-/* ---------- 搜索源在线更新 ---------- */
-(async function srcUpdater() {
-  const btn = $('#srcUpdateBtn');
-  if (!btn) return;
-  function fmtAt(meta) {
-    return meta.updatedAt ? String(meta.updatedAt).replace('T', ' ').slice(5, 16) : '';
+    if (!response.ok) throw new Error(`Knaben HTTP ${response.status}`);
+
+    const text = await response.clone().text();
+    const cacheResponse = new Response(text, {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'public, max-age=1800' },
+    });
+    if (waitUntil) waitUntil(cache.put(cacheKey, cacheResponse));
+    else await cache.put(cacheKey, cacheResponse);
   }
-  async function loadStatus() {
-    try {
-      const res = await fetch(API_BASE + '/api/domains', { cache: 'no-store' });
-      if (res.ok) {
-        const json = await res.json();
-        const meta = json.meta;
-        if (meta) {
-          let txt = '本地版 · 15 源';
-          if (meta.source === 'local') txt += ' · 搜索源已自动更新' + (fmtAt(meta) ? ' · ' + fmtAt(meta) : '');
-          else txt += ' · 搜索源内置，共 ' + (meta.totalDomains || 0) + ' 个（联网后自动更新）';
-          const sub = $('#brandSub');
-          if (sub) sub.textContent = txt;
-        }
-      }
-    } catch (e) { /* 忽略 */ }
+
+  return parseKnabenResults(await response.json());
+}
+
+function parseKnabenResults(data) {
+  const items = [];
+  for (const hit of (data.hits || [])) {
+    if (!hit.title) continue;
+    const magnet = hit.magnetUrl ? simplifyMagnet(hit.magnetUrl) : (hit.hash ? `magnet:?xt=urn:btih:${hit.hash}` : '');
+    if (!magnet) continue;
+    items.push({
+      name: hit.title,
+      size: formatBytes(hit.bytes),
+      date: hit.date ? hit.date.slice(0, 10) : '',
+      seeds: hit.seeders || 0,
+      peers: hit.peers || 0,
+      magnet: magnet,
+      detailUrl: hit.details || '',
+      source: 'knaben',
+    });
   }
-  btn.addEventListener('click', async () => {
-    if (btn.disabled) return;
-    btn.disabled = true;
-    btn.textContent = '更新中…';
-    toast('正在后台更新搜索源，约需 1 分钟…');
+  return items;
+}
+
+// ========== 磁力百科 / 磁力搜（共用） ==========
+async function fetchFromCilibaike(query, page, sort, waitUntil, sourceKey = 'cilibaike') {
+  // 搜索那一刻按当前时隙实时计算（不读静态名单，不依赖 update_domains 的定时刷新）
+  const domains = sourceKey === 'ciliso' ? getCilisoDomains() : getCilibaikeDomains();
+  if (!domains || domains.length === 0) return [];
+
+  let order = '0';
+  switch (sort) {
+    case 'length': order = '1'; break;
+    case 'time':
+    case 'newest': order = '2'; break;
+    case 'requests': order = '3'; break;
+    default: order = '0'; break;
+  }
+
+  const searchPath = `/search-${encodeURIComponent(query)}-0-${order}-${page}.html`;
+
+  for (const domain of domains) {
     try {
-      const res = await fetch(API_BASE + '/api/domains/refresh', { method: 'POST' });
-      const json = await res.json().catch(() => null);
-      if (json && json.meta) {
-        const m = json.meta;
-        if (json.ok && m && m.source === 'local') {
-          toast('搜索源已更新：' + (m.totalDomains || 0) + ' 个域名');
-        } else if (m) {
-          toast('已检测，当前 ' + (m.totalDomains || 0) + ' 个域名；没更新到的源稍后自动重试');
-        } else {
-          toast('更新失败，已保留现有域名', true);
-        }
-        loadStatus();
-      } else {
-        toast('更新失败', true);
-      }
-    } catch (e) {
-      toast('更新失败：' + (e.message || e), true);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = '更新搜索源';
+      const html = await fetchWithCache(`${domain}${searchPath}?lang=zh_CN`, 900, waitUntil);
+      if (!html.includes('resource-card')) continue;
+      const items = parseCilibaikeResults(html, domain, sourceKey);
+      if (items.length > 0) return items;
+    } catch (err) {
+      console.error(`${sourceKey} domain ${domain} failed:`, err);
     }
-  });
-  loadStatus();
-})();
+  }
+  return [];
+}
 
-/* ---------- init ---------- */
-loadQbConfig();
-buildChips();
-buildHead();
-updateCount();
-wireQbDialog();
-$('#searchForm').addEventListener('submit', (e) => { e.preventDefault(); const q = $('#query').value.trim(); if (q) doSearch(q, 1); });
-$('#minSeeds').addEventListener('change', () => {
-  state.minSeeds = parseInt($('#minSeeds').value || '0', 10) || 0;
-  renderTable();
-});
-document.querySelectorAll('input[name="match"]').forEach((r) => {
-  r.addEventListener('change', () => {
-    state.matchMode = document.querySelector('input[name="match"]:checked').value;
-    if (currentQuery) renderTable();
+function parseCilibaikeResults(html, domain, sourceKey = 'cilibaike') {
+  const items = [];
+  const parts = html.split(/<article class="resource resource-card"[^>]*>/);
+  for (let i = 1; i < parts.length; i++) {
+    const block = parts[i];
+    const titleMatch = block.match(/<h2><a[^>]+href="(\/hash\/([a-fA-F0-9]{40})\.html)"[^>]*>([\s\S]*?)<\/a><\/h2>/);
+    if (!titleMatch) continue;
+    const detailPath = titleMatch[1];
+    const infoHash = titleMatch[2];
+    let name = titleMatch[3].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    name = name.replace(/^【[^】]+】\s*/, '');
+    if (!name) continue;
+
+    const metaMatch = block.match(/<div class="meta resource-meta">([\s\S]*?)<\/div>/);
+    let size = '', date = '';
+    if (metaMatch) {
+      const meta = metaMatch[1];
+      const sizeMatch = meta.match(/大小：\s*<span>([^<]+)<\/span>/);
+      const dateMatch = meta.match(/添加时间：\s*<span>([^<]+)<\/span>/);
+      if (sizeMatch) size = sizeMatch[1].trim();
+      if (dateMatch) date = dateMatch[1].trim();
+    }
+
+    items.push({
+      name, size, date,
+      magnet: `magnet:?xt=urn:btih:${infoHash}`,
+      detailUrl: `${domain}${detailPath}`,
+      source: sourceKey,
+    });
+  }
+  return items;
+}
+
+// ========== 1337x（可直连镜像；CF 验证的域名会被自动跳过） ==========
+const X1337X_CANDIDATES = ['https://1337x.la', 'https://1337x.st', 'https://www.1337x.tw', 'https://www.1337xx.to', 'https://1337xto.to'];
+const X1337X_UA = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'zh-CN,zh;q=0.9',
+};
+
+// 1337x 不用 fetchWithCache：偶发 CF 验证页绝不能进缓存（缓存会把“验证页”固化 15 分钟导致源一直 0 结果）
+// 注意：正常 1337x 页面也引用 challenge-platform 脚本，判定只认验证页特有字样，不能误伤真页
+async function fetchX1337x(url) {
+  const resp = await fetch(url, { headers: X1337X_UA, signal: AbortSignal.timeout(10000) });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const text = await resp.text();
+  if (/<title>\s*(just a moment|attention required|请稍候)/i.test(text)) {
+    throw new Error('CF验证');
+  }
+  return text;
+}
+
+function parseX1337xRows(html) {
+  const rows = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)].map((m) => m[1]).filter((r) => /torrent\/\d+/.test(r));
+  const items = [];
+  for (const row of rows) {
+    const link = [...row.matchAll(/<a[^>]*href="(\/torrent\/\d+\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/g)]
+      .find((m) => m[2].replace(/<[^>]+>/g, '').trim());
+    if (!link) continue;
+    const name = link[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    if (!name) continue;
+    items.push({
+      name,
+      detailPath: link[1],
+      size: ((row.match(/coll-4 size[^>]*>([^<]+)/) || [])[1] || '').trim(),
+      seeds: parseInt(((row.match(/coll-2 seeds[^>]*>([^<]+)/) || [])[1] || '0').replace(/[^\d]/g, '')) || 0,
+      peers: parseInt(((row.match(/coll-3 leeches[^>]*>([^<]+)/) || [])[1] || '0').replace(/[^\d]/g, '')) || 0,
+      date: ((row.match(/coll-date[^>]*>([^<]+)/) || [])[1] || '').trim(),
+    });
+  }
+  return items;
+}
+
+// 详情页并发抓 magnet（限量并发，单条失败跳过，不拖整体）
+async function attachX1337xMagnets(domain, rows, waitUntil) {
+  const CONCURRENCY = 6;
+  let idx = 0;
+  const worker = async () => {
+    while (idx < rows.length) {
+      const i = idx++;
+      const row = rows[i];
+      try {
+        const html = await fetchX1337x(`${domain}${row.detailPath}`);
+        const m = html.match(/magnet:\?xt=urn:btih:[a-zA-Z0-9]+[^"'\s]*/);
+        if (m) row.magnet = simplifyMagnet(m[0]);
+      } catch (e) { /* 单条详情失败跳过 */ }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, rows.length) }, worker));
+  return rows;
+}
+
+async function fetchFromX1337x(query, page, sort, waitUntil) {
+  const cfg = getDomains().x1337x || [];
+  const domains = (cfg.length ? cfg : X1337X_CANDIDATES).slice(0, 4);
+  const failures = [];
+  // 1337x 是宽松 OR 匹配 + 20条/页：完整文件名（多点号）会让它退回热门列表、多词又噪音爆炸。
+  // 实测 Tom.and.Jerry.2021.1080p.WEBRip.6CH.x264 → 发 "Tom Jerry 2021" 后第 3 页可命中。
+  // 策略：发宽泛查询（剥技术词+停用词）→ 先抓第 1 页（单词搜索保持原速度）→
+  // 本地核心词过滤，第 1 页无命中才补抓第 2/3 页（完整文件名等长查询场景）。
+  const sendQ = broadQuery(query);
+  const coreTokens = tokenizeQuery(sendQ);
+  // 固定按需翻到第 3 页（与前端分页无关）：本地过滤需要多页覆盖，
+  // 完整文件名等长查询时目标条常落在第 2/3 页；命中即停不浪费请求。
+  const maxPages = 3;
+
+  for (const domain of domains) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        let allRows = [];
+        let matched = [];
+        // 第 1 页
+        const html1 = await fetchX1337x(`${domain}/search/${encodeURIComponent(sendQ)}/1/`);
+        const rows1 = parseX1337xRows(html1);
+        if (rows1.length) {
+          allRows.push(...rows1);
+          matched.push(...rows1.filter((r) => titleMatchesTokens(r.name, coreTokens)));
+        } else {
+          failures.push(`${domain}=第1页无结果`);
+        }
+        // 第 1 页无命中才并行补抓剩余页
+        if (!matched.length && maxPages >= 2 && allRows.length) {
+          // allSettled：单页失败只跳过该页，不丢掉其它页已抓到的目标
+          const settled = await Promise.allSettled(
+            Array.from({ length: maxPages - 1 }, (_, i) =>
+              fetchX1337x(`${domain}/search/${encodeURIComponent(sendQ)}/${i + 2}/`)
+            )
+          );
+          settled.forEach((s, i) => {
+            if (s.status === 'fulfilled') {
+              const rows = parseX1337xRows(s.value);
+              if (rows.length) {
+                allRows.push(...rows);
+                matched.push(...rows.filter((r) => titleMatchesTokens(r.name, coreTokens)));
+              }
+            } else {
+              failures.push(`${domain}=第${i + 2}页失败`);
+            }
+          });
+        }
+        if (!allRows.length) break;
+        // 一条都不匹配时退回全部（单核心词/中文查询等场景 1337x 本就给不出精确匹配）
+        const candidates = matched.length ? matched : allRows;
+        await attachX1337xMagnets(domain, candidates.slice(0, 15), waitUntil);
+        const hits = candidates.filter((it) => it.magnet);
+        if (hits.length) {
+          return hits.map((it) => ({
+            name: it.name,
+            size: it.size,
+            date: it.date,
+            seeds: it.seeds,
+            peers: it.peers,
+            magnet: it.magnet,
+            detailUrl: `${domain}${it.detailPath}`,
+            source: 'x1337x',
+          }));
+        }
+        failures.push(`${domain}=详情未取到magnet`);
+        break;
+      } catch (e) {
+        if (attempt === 0) { continue; } // 重试一次（应对偶发 CF 验证）
+        failures.push(`${domain}=${e.message}`);
+      }
+    }
+  }
+  console.error(`x1337x 所有候选失败: ${failures.join('; ')}`);
+  return [];
+}
+
+// ========== 淘磁力（内部 JSON API + 详情页补 magnet） ==========
+function b64FromUtf8(str) {
+  // 中文等非 ASCII 关键词：btoa 直接对 UTF-16 会抛错，先转 UTF-8 字节再编码
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+async function fetchFromTaocili(query, page, sort, waitUntil) {
+  const domains = getDomainsConfig().taocili || [];
+  if (domains.length === 0) return [];
+
+  const keyword = encodeURIComponent(b64FromUtf8(query));
+  let sortParam = 'default';
+  if (sort === 'time' || sort === 'newest') sortParam = 'atime';
+  else if (sort === 'length') sortParam = 'size_desc';
+
+  // 站点前端实际翻页参数是 start(偏移)/count(条数)，不是 page
+  const start = Math.max(0, (Math.max(1, page || 1) - 1) * 20);
+
+  for (const domain of domains) {
+    try {
+      const apiUrl = `${domain}/apis/search?keyword=${keyword}&base64=1&detail=1&start=${start}&count=20&type=all&sort=${sortParam}`;
+      const text = await fetchWithCache(apiUrl, 1800, waitUntil);
+      let data;
+      try { data = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
+      if (!data || data.code !== 0 || !Array.isArray(data.items)) continue;
+      const rows = data.items.filter((it) => it && it.name && it._id).slice(0, 20);
+      if (rows.length === 0) continue;
+      const items = rows.map(row => ({
+        name: row.name,
+        size: formatBytes(row.len),
+        date: row.atime ? new Date(row.atime).toISOString().slice(0, 10) : '',
+        magnet: '',
+        detailUrl: `${domain}/magnet/${row._id}`,
+        source: 'taocili',
+      }));
+      if (items.length > 0) return items;
+    } catch (err) {
+      console.error(`Taocili domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+// 详情页并发抓 magnet（限量并发，单条失败跳过，不拖整体）
+async function batchFetchTaociliMagnets(rows, domain, waitUntil) {
+  const CONCURRENCY = 6;
+  const results = [];
+  let idx = 0;
+  const worker = async () => {
+    while (idx < rows.length) {
+      const i = idx++;
+      const row = rows[i];
+      try {
+        const detailUrl = `${domain}/magnet/${row._id}`;
+        const html = await fetchWithCache(detailUrl, 3600, waitUntil);
+        const m = html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{40}/);
+        if (!m) continue;
+        results.push({
+          name: row.name,
+          size: formatBytes(row.len),
+          date: row.atime ? new Date(row.atime).toISOString().slice(0, 10) : '',
+          magnet: simplifyMagnet(m[0]),
+          detailUrl,
+          source: 'taocili',
+        });
+      } catch (e) { /* 单条详情失败跳过 */ }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, rows.length) }, worker));
+  return results;
+}
+
+// ========== BtFox ==========
+// 列表页普通 HTML；关键词用无 padding base64；磁力在 /info/{id} 详情页 <input id="mag-link">
+async function fetchFromBtfox(query, page, sort, waitUntil) {
+  const domains = getDomainsConfig().btfox || ['https://btfox20.top'];
+  if (domains.length === 0) return [];
+
+  const wd = Buffer.from(query, 'utf-8').toString('base64').replace(/=+$/, '');
+  let sortParam = 'time';
+  if (sort === 'requests' || sort === 'hits') sortParam = 'hits';
+  else if (sort === 'length') sortParam = 'length';
+  else if (sort === 'relevance' || sort === 'rele') sortParam = 'rele';
+  const pageNum = Math.max(1, page || 1);
+
+  for (const domain of domains) {
+    try {
+      const listUrl = `${domain}/s?wd=${wd}&sort=${sortParam}&page=${pageNum}`;
+      const html = await fetchWithCache(listUrl, 1800, waitUntil);
+      const items = parseBtfoxList(html, domain);
+      if (items.length === 0) continue;
+      return items; // 磁力链接按需加载
+    } catch (err) {
+      console.error(`BtFox domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+function parseBtfoxList(html, domain) {
+  const items = [];
+  const blocks = html.split(/<div class="item">/);
+  for (let i = 1; i < blocks.length; i++) {
+    const block = blocks[i];
+    const end = block.indexOf('<div class="box_border">');
+    const seg = end > 0 ? block.slice(0, end) : block;
+    const aMatch = seg.match(/<a[^>]+href="([^"]+)"[^>]*title="([^"]*)"/);
+    if (!aMatch) continue;
+    let href = aMatch[1].trim();
+    if (!href.startsWith('http')) href = domain.replace(/\/+$/, '') + href;
+    if (!href.includes('/info/')) continue;
+    const title = (aMatch[2] || '').replace(/<[^>]+>/g, '').trim();
+    if (!title) continue;
+
+    const noteMatch = seg.match(/<div class="threadlist_note">([\s\S]*?)<\/div>/);
+    let size = '', date = '';
+    if (noteMatch) {
+      const sizeM = noteMatch[1].match(/length[：:][\s\S]*?([\d.]+\s*(?:B|KB|MB|GB|TB))/i);
+      if (sizeM) size = sizeM[1].replace(/\s+/g, ' ');
+      const dateM = noteMatch[1].match(/date[：:][\s\S]*?(\d{4}-\d{2}-\d{2})/);
+      if (dateM) date = dateM[1];
+    }
+    items.push({ name: title, size, date, detailUrl: href, source: 'btfox' });
+  }
+  return items;
+}
+
+async function batchFetchBtfoxMagnets(items, waitUntil) {
+  const CONCURRENCY = 5;
+  const results = [];
+  let idx = 0;
+  const worker = async () => {
+    while (idx < items.length) {
+      const i = idx++;
+      const item = items[i];
+      try {
+        const html = await fetchWithCache(item.detailUrl, 3600, waitUntil);
+        const m = html.match(/<input[^>]+id="mag-link"[^>]+value="(magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40})"/)
+          || html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/);
+        if (m) {
+          results.push({
+            name: item.name,
+            size: item.size,
+            date: item.date,
+            magnet: simplifyMagnet(m[1] || m[0]),
+            detailUrl: item.detailUrl,
+            source: 'btfox',
+          });
+        }
+      } catch (e) { /* 单条详情失败跳过 */ }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker));
+  return results;
+}
+
+// ========== 种子吧 ==========
+// 列表 <li class="media">；磁力在 /seed/{id} 详情页 <textarea id="magnetLink">
+async function fetchFromZhongziba(query, page, sort, waitUntil) {
+  const domains = getDomainsConfig().zhongziba || ['https://zzb10.vip'];
+  if (domains.length === 0) return [];
+
+  const wd = Buffer.from(query, 'utf-8').toString('base64').replace(/=+$/, '');
+  let sortParam = 'rel';
+  if (sort === 'time' || sort === 'newest') sortParam = 'time';
+  else if (sort === 'requests' || sort === 'hits') sortParam = 'hits';
+  else if (sort === 'length') sortParam = 'size';
+  const pageNum = Math.max(1, page || 1);
+
+  for (const domain of domains) {
+    try {
+      const listUrl = `${domain}/search?wd=${wd}&sort=${sortParam}&page=${pageNum}`;
+      const html = await fetchWithCache(listUrl, 1800, waitUntil);
+      const items = parseZhongzibaList(html, domain);
+      if (items.length === 0) continue;
+      return items; // 磁力链接按需加载
+    } catch (err) {
+      console.error(`Zhongziba domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+function parseZhongzibaList(html, domain) {
+  const items = [];
+  const blocks = html.split(/<li class="media">/);
+  for (let i = 1; i < blocks.length; i++) {
+    const block = blocks[i];
+    const end = block.indexOf('</li>');
+    const seg = end > 0 ? block.slice(0, end) : block;
+    const aMatch = seg.match(/<a[^>]+href="([^"]+)"[^>]*title="([^"]*)"/);
+    if (!aMatch) continue;
+    let href = aMatch[1].trim();
+    if (!href.startsWith('http')) href = domain.replace(/\/+$/, '') + href;
+    if (!href.includes('/seed/')) continue;
+    const title = (aMatch[2] || '').replace(/<[^>]+>/g, '').trim();
+    if (!title) continue;
+
+    let size = '', date = '';
+    const dateM = seg.match(/日期[：:]\s*<span[^>]*>(\d{4}-\d{2}-\d{2})<\/span>/);
+    if (dateM) date = dateM[1];
+    const sizeM = seg.match(/大小[：:]\s*<span[^>]*>([\d.]+\s*(?:B|KB|MB|GB|TB))<\/span>/i);
+    if (sizeM) size = sizeM[1].replace(/\s+/g, ' ');
+    items.push({ name: title, size, date, detailUrl: href, source: 'zhongziba' });
+  }
+  return items;
+}
+
+async function batchFetchZhongzibaMagnets(items, waitUntil) {
+  const CONCURRENCY = 5;
+  const results = [];
+  let idx = 0;
+  const worker = async () => {
+    while (idx < items.length) {
+      const i = idx++;
+      const item = items[i];
+      try {
+        const html = await fetchWithCache(item.detailUrl, 3600, waitUntil);
+        const m = html.match(/<textarea[^>]+id="magnetLink"[^>]*>\s*(magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40})/)
+          || html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/);
+        if (m) {
+          results.push({
+            name: item.name,
+            size: item.size,
+            date: item.date,
+            magnet: simplifyMagnet(m[1] || m[0]),
+            detailUrl: item.detailUrl,
+            source: 'zhongziba',
+          });
+        }
+      } catch (e) { /* 单条详情失败跳过 */ }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker));
+  return results;
+}
+
+// ========== 磁力池 ==========
+async function fetchFromCilichi(query, page, sort, waitUntil) {
+  const domains = getDomainsConfig().cilichi || ['https://www.cilichi.pro'];
+  if (domains.length === 0) return [];
+  const hex = Buffer.from(query, 'utf-8').toString('hex');
+  let sortParam = 'id';
+  if (sort === 'length') sortParam = 'length';
+  else if (sort === 'requests' || sort === 'hits') sortParam = 'requests';
+  else if (sort === 'relevance' || sort === 'rele') sortParam = '';
+  const pageNum = Math.max(1, page || 1);
+  for (const domain of domains) {
+    try {
+      const sortPart = `_${sortParam}`;
+      const listUrl = `${domain}/cilichi/${hex}_${pageNum}${sortPart}.html`;
+      const html = await fetchWithCache(listUrl, 1800, waitUntil);
+      const items = parseCilichiList(html, domain);
+      if (items.length === 0) continue;
+      return items; // 磁力链接按需加载
+    } catch (err) { console.error(`Cilichi domain ${domain} failed:`, err); }
+  }
+  return [];
+}
+function parseCilichiList(html, domain) {
+  const items = [];
+  const blocks = html.split(/<div class="card border-dashed border-2 mb-2">/);
+  for (let i = 1; i < blocks.length; i++) {
+    const block = blocks[i];
+    const end = block.indexOf('</div>\n</div>');
+    const seg = end > 0 ? block.slice(0, end) : block;
+    const aMatch = seg.match(/<a[^>]+href="([^"]*\/btcililianjie\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+    if (!aMatch) continue;
+    let href = aMatch[1].trim();
+    if (!href.startsWith('http')) href = domain.replace(/\/+$/, '') + href;
+    if (!href.includes('/btcililianjie/')) continue;
+    const title = aMatch[2].replace(/<[^>]+>/g, '').trim();
+    if (!title) continue;
+    let size = '';
+    const sizeM = seg.match(/文件[：:]\s*<span[^>]*>\s*([\d.]+\s*(?:B|KB|MB|GB|TB))/i);
+    if (sizeM) size = sizeM[1].replace(/\s+/g, ' ');
+    items.push({ name: title, size, date: '', detailUrl: href, source: 'cilichi' });
+  }
+  return items;
+}
+async function batchFetchCilichiMagnets(items, waitUntil) {
+  const CONCURRENCY = 5;
+  const results = [];
+  let idx = 0;
+  const worker = async () => {
+    while (idx < items.length) {
+      const i = idx++;
+      const item = items[i];
+      try {
+        const html = await fetchWithCache(item.detailUrl, 3600, waitUntil);
+        const m = html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/)
+          || html.match(/magnet:\?xt=urn:([a-fA-F0-9]{40})/);
+        if (m) {
+          const magnetUrl = m[0].includes('btih:') ? m[0] : `magnet:?xt=urn:btih:${m[1]}`;
+          results.push({ name: item.name, size: item.size, date: item.date, magnet: simplifyMagnet(magnetUrl), detailUrl: item.detailUrl, source: 'cilichi' });
+        }
+      } catch (e) {}
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker));
+  return results;
+}
+
+// ========== Bitsearch ==========
+async function fetchFromBitsearch(query, page, sort, waitUntil) {
+  const domains = getDomainsConfig().bitsearch || ['https://bitsearch.eu'];
+  if (domains.length === 0) return [];
+  let sortBy = 'relevance';
+  if (sort === 'seeders' || sort === 'hits' || sort === 'requests') sortBy = 'seeders';
+  else if (sort === 'length' || sort === 'size') sortBy = 'size';
+  else if (sort === 'time' || sort === 'newest') sortBy = 'created';
+  const pageNum = Math.max(1, page || 1);
+  for (const domain of domains) {
+    try {
+      const url = `${domain}/search?q=${encodeURIComponent(query)}&sortBy=${sortBy}&page=${pageNum}`;
+      const html = await fetchWithCache(url, 1800, waitUntil);
+      const items = parseBitsearchList(html, domain);
+      if (items.length > 0) return items;
+    } catch (err) { console.error(`Bitsearch domain ${domain} failed:`, err); }
+  }
+  return [];
+}
+function parseBitsearchList(html, domain) {
+  const items = [];
+  const cards = html.split('<div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6');
+  for (let i = 1; i < cards.length; i++) {
+    const card = cards[i];
+    const titleM = card.match(/<h3[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+    if (!titleM) continue;
+    let title = titleM[2].replace(/<[^>]+>/g, '').trim();
+    const magM = card.match(/btih:([A-F0-9]{40})/);
+    if (!magM) continue;
+    const magnet = 'magnet:?xt=urn:btih:' + magM[1].toLowerCase();
+    let size = '';
+    const sizeM = card.match(/<i class="fas fa-download"><\/i>\s*<span>([\d.]+\s*(?:B|KB|MB|GB|TB))/);
+    if (sizeM) size = sizeM[1];
+    let date = '';
+    const dateM = card.match(/<i class="fas fa-calendar"><\/i>\s*<span>([\d/]+)<\/span>/);
+    if (dateM) {
+      const parts = dateM[1].split('/');
+      if (parts.length === 3) date = `${parts[2]}-${parts[0].padStart(2,'0')}-${parts[1].padStart(2,'0')}`;
+    }
+    let seeders = '';
+    const seedM = card.match(/<i class="fas fa-arrow-up"><\/i>\s*<span class="font-medium">(\d+)<\/span>\s*<span>seeders/);
+    if (seedM) seeders = seedM[1];
+    let detailUrl = titleM[1];
+    if (detailUrl.startsWith('/')) detailUrl = domain.replace(/\/+$/, '') + detailUrl;
+    items.push({
+      name: title,
+      size,
+      date,
+      magnet: simplifyMagnet(magnet),
+      detailUrl,
+      source: 'bitsearch',
+      seeders,
+    });
+  }
+  return items;
+}
+
+async function fetchFromJuniorter(query, page, sort, waitUntil) {
+  const juniorterSort = (sort === 'time' || sort === 'newest') ? 'date' : 'seeds';
+  const apiUrl = `${JUNIORTER_API}?q=${encodeURIComponent(query)}&sort=${juniorterSort}&pageSize=50&providers=${encodeURIComponent(JUNIORTER_PROVIDERS)}`;
+
+  const cacheKey = new Request(apiUrl, { method: 'GET' });
+  const cache = caches.default;
+
+  let response = await cache.match(cacheKey);
+  if (!response) {
+    response = await fetch(apiUrl, {
+      headers: {
+        'Accept': 'text/event-stream',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://torrent.juniorter.in/ch/',
+      },
+    });
+    if (!response.ok) throw new Error(`Juniorter HTTP ${response.status}`);
+
+    const cacheResponse = new Response(await response.clone().text(), {
+      headers: { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'public, max-age=1800' },
+    });
+    if (waitUntil) waitUntil(cache.put(cacheKey, cacheResponse));
+    else await cache.put(cacheKey, cacheResponse);
+  }
+
+  return parseJuniorterSSE(await response.text());
+}
+
+function parseJuniorterSSE(text) {
+  const items = [];
+  let currentEvent = null, currentData = '';
+  for (const line of text.split('\n')) {
+    if (line.startsWith('event: ')) currentEvent = line.slice(7).trim();
+    else if (line.startsWith('data: ')) currentData = line.slice(6);
+    else if (line === '' && currentEvent && currentData) {
+      if (currentEvent === 'provider') {
+        try {
+          const parsed = JSON.parse(currentData);
+          if (parsed.ok && Array.isArray(parsed.results)) {
+            for (const r of parsed.results) {
+              if (r.magnet && r.title) {
+                items.push({
+                  name: r.title,
+                  size: r.size || '',
+                  date: r.date ? r.date.slice(0, 10) : '',
+                  seeds: r.seeds || 0,
+                  peers: r.peers || 0,
+                  magnet: simplifyMagnet(r.magnet),
+                  detailUrl: r.url || '',
+                  source: 'juniorter',
+                });
+              }
+            }
+          }
+        } catch (e) {}
+      }
+      currentEvent = null; currentData = '';
+    }
+  }
+  return items;
+}
+
+// ========== 小草磁力 ==========
+function getXiaocaoSortPath(sort) {
+  switch (sort) {
+    case 'length': return '-length';
+    case 'time': return '-time';
+    case 'requests': return '-requests';
+    default: return '';
+  }
+}
+
+async function fetchFromXiaocao(query, page, sort, waitUntil) {
+  const config = getDomainsConfig();
+  const domains = config.xiaocao;
+  if (domains.length === 0) return [];
+  const sortPath = getXiaocaoSortPath(sort);
+
+  for (const domain of domains) {
+    try {
+      const html = await fetchWithCache(`${domain}/search/kw-${encodeURIComponent(query)}${sortPath}-${page}.html`, 3600, waitUntil);
+      if (!html.includes('search-item')) continue;
+      const items = parseXiaocaoResults(html, domain);
+      if (items.length > 0) return items;
+    } catch (err) {
+      console.error(`Xiaocao domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+function parseXiaocaoResults(html, domain) {
+  const items = [];
+  const parts = html.split(/<div class="search-item[^"]*">/);
+  for (let i = 1; i < parts.length; i++) {
+    const block = parts[i];
+    const titleMatch = block.match(/<a[^>]+href="(\/hash\/([a-fA-F0-9]{40})\.html)"[^>]*>([\s\S]*?)<\/a>/);
+    if (!titleMatch) continue;
+    const name = titleMatch[3].replace(/<[^>]+>/g, '').trim();
+    if (!name) continue;
+
+    const sizeMatch = block.match(/文件大小:\s*<b[^>]*>([^<]+)<\/b>/);
+    const dateMatch = block.match(/创建时间:\s*(?:&nbsp;|\s)*<b>([^<]+)<\/b>/);
+    const hotMatch = block.match(/下载热度:\s*(?:&nbsp;|\s)*<b>([^<]+)<\/b>/);
+
+    items.push({
+      name,
+      size: sizeMatch ? sizeMatch[1].trim() : '',
+      date: dateMatch ? dateMatch[1].trim() : '',
+      hot: hotMatch ? hotMatch[1].trim() : '',
+      magnet: `magnet:?xt=urn:btih:${titleMatch[2]}`,
+      detailUrl: `${domain}${titleMatch[1]}`,
+      source: 'xiaocao',
+    });
+  }
+  return items;
+}
+
+// ========== ØMagnet ==========
+async function fetchFrom0Magnet(query, sort, page, waitUntil) {
+  const searchHtml = await fetchWithCache(`https://0magnet.com/search?q=${encodeURIComponent(query)}&sort=${sort}&page=${page}`, 3600, waitUntil);
+  const items = await parse0MagnetSearchResults(searchHtml);
+  if (items.length === 0) return [];
+  return await batchFetch0MagnetDetails(items, 5, waitUntil);
+}
+
+async function parse0MagnetSearchResults(html) {
+  const items = [];
+  const parts = html.split(/<tr[^>]*>/);
+  for (let i = 1; i < parts.length; i++) {
+    const block = parts[i];
+    const linkMatch = block.match(/<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+    if (!linkMatch) continue;
+    const detailPath = linkMatch[1];
+    const name = linkMatch[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    if (!name || !detailPath.includes('/')) continue;
+
+    const sizeMatch = block.match(/<td[^>]*>\s*(\d+(?:\.\d+)?\s*(?:B|KB|MB|GB|TB))\s*<\/td>/i);
+
+    items.push({
+      name,
+      size: sizeMatch ? sizeMatch[1].trim() : '',
+      date: '',
+      detailPath,
+      source: '0magnet',
+    });
+  }
+  return items;
+}
+
+async function batchFetch0MagnetDetails(items, concurrency, waitUntil) {
+  const results = [];
+  let index = 0;
+
+  async function worker() {
+    while (index < items.length) {
+      const i = index++;
+      const item = items[i];
+      try {
+        const detailUrl = item.detailPath.startsWith('http')
+          ? item.detailPath
+          : `https://0magnet.com${item.detailPath}`;
+        const html = await fetchWithCache(detailUrl, 3600, waitUntil);
+        const magnetMatch = html.match(/magnet:\?xt=urn:btih:[a-zA-Z0-9]{32,40}/);
+        if (magnetMatch) {
+          results.push({
+            name: item.name,
+            size: item.size,
+            date: item.date,
+            magnet: simplifyMagnet(magnetMatch[0]),
+            detailUrl,
+            source: '0magnet',
+          });
+        }
+      } catch (e) {}
+    }
+  }
+
+  const workers = [];
+  for (let i = 0; i < concurrency; i++) workers.push(worker());
+  await Promise.all(workers);
+  return results;
+}
+
+// ========== 雨花阁 ==========
+async function fetchFromYuhuage(query, page, sort, waitUntil) {
+  const config = getDomainsConfig();
+  const domains = config.yuhuage;
+  if (domains.length === 0) return [];
+
+  const searchPath = `/search/${encodeURIComponent(query)}-${page}.html`;
+
+  for (const domain of domains) {
+    try {
+      const html = await fetchWithCache(`${domain}${searchPath}`, 3600, waitUntil);
+      const items = parseYuhuageResults(html, domain);
+      if (items.length > 0) return items;
+    } catch (err) {
+      console.error(`Yuhuage domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+function parseYuhuageResults(html, domain) {
+  const items = [];
+  const parts = html.split(/<div class="search-item detail-width">/);
+  for (let i = 1; i < parts.length; i++) {
+    const block = parts[i];
+
+    const linkMatch = block.match(/<h3><a[^>]+href="\/hash\/([a-fA-F0-9]{40})\.html"[^>]*>([\s\S]*?)<\/a><\/h3>/);
+    if (!linkMatch) continue;
+    const infoHash = linkMatch[1];
+    let name = linkMatch[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    if (!name) continue;
+
+    const dateMatch = block.match(/创建时间：<b>\s*([^<]+)/);
+    const sizeMatch = block.match(/大小：<b[^>]*>([^<]+)<\/b>/);
+
+    items.push({
+      name,
+      size: sizeMatch ? sizeMatch[1].trim() : '',
+      date: dateMatch ? dateMatch[1].trim() : '',
+      magnet: `magnet:?xt=urn:btih:${infoHash}`,
+      detailUrl: `${domain}/hash/${infoHash}.html`,
+      source: 'yuhuage',
+    });
+  }
+  return items;
+}
+
+// ========== 虎风 ==========
+async function fetchFromHufeng(query, page, sort, waitUntil) {
+  const config = getDomainsConfig();
+  const domains = config.hufeng;
+  if (domains.length === 0) return [];
+
+  const searchPath = `/search/${encodeURIComponent(query)}_ctime_${page}.html`;
+
+  for (const domain of domains) {
+    try {
+      const html = await fetchWithCache(`${domain}${searchPath}`, 3600, waitUntil);
+      const items = parseHufengResults(html, domain);
+      if (items.length > 0) return items;
+    } catch (err) {
+      console.error(`Hufeng domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+function parseHufengResults(html, domain) {
+  const items = [];
+  const parts = html.split(/<div class="result">/);
+  for (let i = 1; i < parts.length; i++) {
+    const block = parts[i];
+
+    const linkMatch = block.match(/<a[^>]+href="\/([a-fA-F0-9]{40})\.html"[^>]*>([\s\S]*?)<\/a>/);
+    if (!linkMatch) continue;
+    const infoHash = linkMatch[1];
+    let name = linkMatch[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    if (!name) continue;
+
+    const dateMatch = block.match(/时间：\s*([^<]+)/);
+    const sizeMatch = block.match(/大小：\s*([^<]+)/);
+
+    items.push({
+      name,
+      size: sizeMatch ? sizeMatch[1].trim() : '',
+      date: dateMatch ? dateMatch[1].trim() : '',
+      magnet: `magnet:?xt=urn:btih:${infoHash}`,
+      detailUrl: `${domain}/${infoHash}.html`,
+      source: 'hufeng',
+    });
+  }
+  return items;
+}
+
+// ========== U3C3 (cctv10) ==========
+async function fetchFromCctv10(query, page, sort, waitUntil) {
+  const config = getDomainsConfig();
+  const domains = config.cctv10;
+  CCTV10_DEBUG.domains = domains;
+  CCTV10_DEBUG.query = query;
+
+  if (domains.length === 0) return [];
+
+  for (const domain of domains) {
+    try {
+      const homeHtml = await fetchWithCache(`${domain}/`, 300, waitUntil);
+      CCTV10_DEBUG.homeLen = homeHtml.length;
+      CCTV10_DEBUG.homeHasNmefafej = homeHtml.includes('nmefafej');
+
+      let search2 = null;
+      const matches = [...homeHtml.matchAll(/nmefafej\s*=\s*["']([a-zA-Z0-9]+)["']/g)];
+      CCTV10_DEBUG.matches = matches.map(m => m[1]);
+      if (matches.length > 0) {
+        search2 = matches[matches.length - 1][1];
+      }
+
+      if (!search2) {
+        const m = homeHtml.match(/search2=([a-zA-Z0-9]+)/);
+        if (m) search2 = m[1];
+      }
+
+      CCTV10_DEBUG.search2 = search2;
+
+      if (!search2) {
+        CCTV10_DEBUG.error = 'no search2 found';
+        continue;
+      }
+
+      const searchPath = `/?search2=${search2}&search=${encodeURIComponent(query)}`;
+      const searchUrl = `${domain}${searchPath}`;
+      CCTV10_DEBUG.searchUrl = searchUrl;
+
+      const html = await fetchWithCache(searchUrl, 3600, waitUntil);
+      CCTV10_DEBUG.searchLen = html.length;
+      CCTV10_DEBUG.searchHasTorrentList = html.includes('torrent-list');
+
+      if (!html.includes('torrent-list')) continue;
+      const items = parseCctv10Results(html, domain);
+      CCTV10_DEBUG.parsedCount = items.length;
+
+      if (items.length > 0) return items;
+    } catch (err) {
+      CCTV10_DEBUG.error = String(err);
+      console.error(`Cctv10 domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+function parseCctv10Results(html, domain) {
+  const items = [];
+  const parts = html.split(/<tr class="default">/);
+  for (let i = 1; i < parts.length; i++) {
+    const block = parts[i];
+
+    const magnetMatch = block.match(/href="(magnet:\?xt=urn:btih:([a-fA-F0-9]{40})[^"]*)"/);
+    if (!magnetMatch) continue;
+    const magnet = simplifyMagnet(magnetMatch[1]);
+    const infoHash = magnetMatch[2];
+
+    const titleMatch = block.match(/<a href="\/view\?id=[^"]+"[^>]*>([\s\S]*?)<\/a>/);
+    if (!titleMatch) continue;
+    let name = titleMatch[1]
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!name) continue;
+
+    const tds = block.match(/<td[^>]*>([\s\S]*?)<\/td>/g) || [];
+    let size = '';
+    let date = '';
+    for (const td of tds) {
+      const content = td.replace(/<[^>]+>/g, '').trim();
+      if (!size && /^\d+(\.\d+)?\s*(B|KB|MB|GB|TB)$/i.test(content)) {
+        size = content;
+      }
+      if (!date && /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$/.test(content)) {
+        date = content;
+      }
+    }
+
+    items.push({
+      name,
+      size,
+      date,
+      magnet,
+      detailUrl: `${domain}/view?id=${infoHash}`,
+      source: 'cctv10',
+    });
+  }
+  return items;
+}
+
+// ========== 磁力猫 ==========
+function decodeAtobHtml(html) {
+  const m = html.match(/window\.atob\("([^"]+)"\)/);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(atob(m[1]));
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchFromCilimao(query, page, sort, waitUntil) {
+  const config = getDomainsConfig();
+  const domains = config.cilimao;
+  CILIMAO_DEBUG.domains = domains;
+  CILIMAO_DEBUG.query = query;
+
+  if (domains.length === 0) {
+    CILIMAO_DEBUG.error = 'no domains';
+    return [];
+  }
+
+  // btoa 只支持 Latin-1：中文等非 ASCII 关键词会抛 InvalidCharacterError，捕获后跳过该源
+  let wordB64;
+  try { wordB64 = btoa(query).replace(/=+$/, ''); } catch (e) { CILIMAO_DEBUG.error = 'btoa non-latin1: ' + e.message; return []; }
+  CILIMAO_DEBUG.wordB64 = wordB64;
+
+  for (const domain of domains) {
+    try {
+      const searchUrl = `${domain}/search?word=${wordB64}&sort=rele&p=${page}`;
+      CILIMAO_DEBUG.searchUrl = searchUrl;
+
+      const html = await fetchWithCache(searchUrl, 1800, waitUntil);
+      CILIMAO_DEBUG.htmlLen = html.length;
+
+      const decoded = decodeAtobHtml(html);
+      CILIMAO_DEBUG.decodedLen = decoded ? decoded.length : 0;
+
+      if (!decoded) {
+        CILIMAO_DEBUG.error = 'decodeAtobHtml failed';
+        continue;
+      }
+
+      const links = [];
+      const linkRe = /<a[^>]+href="(\/information\/[a-zA-Z0-9]+)"[^>]*>([\s\S]*?)<\/a>/g;
+      let m;
+      while ((m = linkRe.exec(decoded)) !== null) {
+        const detailPath = m[1];
+        const name = m[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+        if (name) links.push({ detailPath, name });
+      }
+
+      CILIMAO_DEBUG.linksCount = links.length;
+
+      if (links.length === 0) {
+        CILIMAO_DEBUG.error = 'no links parsed';
+        continue;
+      }
+
+      const items = await batchFetchCilimaoDetails(links, 5, domain, waitUntil);
+      CILIMAO_DEBUG.itemsCount = items.length;
+
+      if (items.length > 0) return items;
+    } catch (err) {
+      CILIMAO_DEBUG.error = String(err);
+      console.error(`Cilimao domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+async function batchFetchCilimaoDetails(links, concurrency, domain, waitUntil) {
+  const results = [];
+  let index = 0;
+
+  async function worker() {
+    while (index < links.length) {
+      const i = index++;
+      const link = links[i];
+      try {
+        const detailUrl = `${domain}${link.detailPath}`;
+        const html = await fetchWithCache(detailUrl, 3600, waitUntil);
+        const decoded = decodeAtobHtml(html);
+        if (!decoded) continue;
+
+        const magnetMatch = decoded.match(/href="(magnet:\?xt=urn:btih:[a-fA-F0-9]{40}[^"]*)"/);
+        if (!magnetMatch) continue;
+        const magnet = simplifyMagnet(magnetMatch[1]);
+
+        const sizeMatch = decoded.match(/文件大小：<\/b>([^<]+)<\/b>/);
+        const dateMatch = decoded.match(/收录时间：<\/b>\s*([^<]+)/);
+
+        results.push({
+          name: link.name,
+          size: sizeMatch ? sizeMatch[1].trim() : '',
+          date: dateMatch ? dateMatch[1].trim() : '',
+          magnet,
+          detailUrl,
+          source: 'cilimao',
+        });
+      } catch (e) {}
+    }
+  }
+
+  const workers = [];
+  for (let i = 0; i < concurrency; i++) workers.push(worker());
+  await Promise.all(workers);
+  return results;
+}
+
+// 单次 HTTP 请求超时（fetchWithCache 用）
+const PER_HTTP_TIMEOUT_MS = 10000;
+
+// ========== 工具函数 ==========
+async function fetchWithCache(url, ttl, waitUntil) {
+  const cacheKey = new Request(url, { method: 'GET' });
+  const cache = caches.default;
+
+  let response = await cache.match(cacheKey);
+  if (!response) {
+    response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+      },
+      // 单次 HTTP 请求 10s 超时（再叠加每源整体 12s 上限），防止某个连接挂死
+      signal: AbortSignal.timeout(PER_HTTP_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+
+    const text = await response.clone().text();
+    const cacheResponse = new Response(text, {
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': `public, max-age=${ttl}`,
+      },
+    });
+    if (waitUntil) waitUntil(cache.put(cacheKey, cacheResponse));
+    else await cache.put(cacheKey, cacheResponse);
+
+    response = new Response(text, {
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    });
+  }
+
+  return await response.text();
+}
+
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
+    },
   });
-});
-</script>
-</body>
-</html>
+}
+
+// ========== 查询规范化 + 本地过滤（借鉴 magnet-finder：站点只捞候选，精确匹配在本地） ==========
+// 技术词：发站点前剥掉（站点的关键词搜索往往匹配不到 1080p/webrip/x264 这类词）
+const QUERY_NOISE_RE = /^(?:s\d{1,2}(?:e\d{1,3})?|e\d{1,3}|\d{3,4}p|x26[45]|h26[45]|hevc|xvid|divx|web|webrip|webdl|dl|hdtv|bluray|brrip|bdrip|dvdrip|remux|repack|proper|internal|amzn|dsnp|nf|hmax|aac|ac3|eac3|ddp\d?|dts|10bit|hdr|sdr|multi|complete|season|episode|6ch|2ch)$/i;
+// 停用词：1337x 是宽松 OR 匹配，and/the 这类词会让噪音爆炸（搜 Tom and Jerry 全是含 and 的片）
+const X1337X_STOPWORDS = new Set(['and', 'or', 'the', 'a', 'an', 'of', 'for', 'with', 'in', 'on', 'at', 'to', 'by', 'is']);
+
+function normalizeTitle(s) {
+  return String(s == null ? '' : s).toLowerCase()
+    .replace(/[._+\-\[\](){}:,!?'"~\\/|@#$%^&*=<>;]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenizeQuery(query) {
+  return normalizeTitle(query).split(' ').filter(Boolean);
+}
+
+/** 标题是否包含全部 token（子串匹配） */
+function titleMatchesTokens(title, tokens) {
+  if (!tokens || !tokens.length) return true;
+  const t = normalizeTitle(title);
+  return tokens.every((tok) => t.indexOf(tok) >= 0);
+}
+
+/** 宽泛查询：剥技术词 + 停用词，只留核心词发给站点（本地过滤保证精度） */
+function broadQuery(query) {
+  const tokens = tokenizeQuery(query);
+  const kept = tokens.filter((t) => !QUERY_NOISE_RE.test(t) && !X1337X_STOPWORDS.has(t));
+  return (kept.length ? kept : tokens).join(' ');
+}
+
+function isoFromUnix(sec) {
+  const n = Number(sec);
+  return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toISOString().slice(0, 10) : '';
+}
+
+// ========== TPB（apibay.org 官方 API，一次返回全部命中） ==========
+const TPB_DOMAINS = ['https://apibay.org'];
+// ========== The Pirate Bay（apibay JSON API） ==========
+async function fetchFromTpb(query, page, sort, waitUntil) {
+  const cfg = getDomainsConfig().tpb;
+  const domains = (cfg && cfg.length) ? cfg : TPB_DOMAINS;
+  for (const domain of domains) {
+    try {
+      const url = `${domain}/q.php?q=${encodeURIComponent(query)}&cat=0`;
+      const text = await fetchWithCache(url, 900, waitUntil);
+      let arr;
+      try { arr = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
+      if (!Array.isArray(arr)) continue;
+      return arr
+        .filter((r) => r && r.id !== '0' && r.info_hash && !/^0+$/.test(r.info_hash))
+        .map((r) => ({
+          name: r.name || '',
+          size: formatBytes(Number(r.size) || 0),
+          date: isoFromUnix(r.added),
+          seeds: Number(r.seeders) || 0,
+          peers: Number(r.leechers) || 0,
+          magnet: `magnet:?xt=urn:btih:${String(r.info_hash).toLowerCase()}`,
+          detailUrl: r.id ? `https://thepiratebay.org/description.php?id=${r.id}` : '',
+          source: 'tpb',
+          imdb: r.imdb || '',
+        }))
+        .filter((it) => it.name && it.magnet);
+    } catch (err) {
+      console.error(`TPB domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+// ========== PirateBay HTML 版（thepiratebay.bond） ==========
+async function fetchFromPiratebay(query, page, sort, waitUntil) {
+  const cfg = getDomainsConfig().piratebay;
+  let domains = (cfg && cfg.length) ? [...cfg] : ['https://thepiratebay.bond'];
+  // 自动发现：先从 piratebayproxy.info 提取可用域名
+  try {
+    const proxyHtml = await fetchWithCache('https://piratebayproxy.info/', 3600, waitUntil);
+    const found = [...proxyHtml.matchAll(/href="(https?:\/\/thepiratebay\.[a-z0-9.-]+)\/?/g)]
+      .map(m => m[1].replace(/\/+$/, ''));
+    if (found.length > 0) {
+      // 把发现的域名排到前面，已配置的也保留
+      domains = [...new Set([...found, ...domains])];
+    }
+  } catch (e) { /* 代理页抓不到就用配置的 */ }
+  let sortNum = '99';
+  if (sort === 'time' || sort === 'newest') sortNum = '3';
+  else if (sort === 'length' || sort === 'size') sortNum = '5';
+  else if (sort === 'seeders' || sort === 'hits' || sort === 'requests') sortNum = '8';
+  else if (sort === 'leechers') sortNum = '9';
+  const pageNum = Math.max(1, page || 1);
+  for (const domain of domains) {
+    try {
+      const url = `${domain}/search/${encodeURIComponent(query)}/${pageNum}/${sortNum}/0`;
+      const html = await fetchWithCache(url, 900, waitUntil);
+      const items = parsePiratebayHtml(html, domain);
+      if (items.length > 0) return items;
+    } catch (err) {
+      console.error(`Piratebay domain ${domain} failed:`, err.message);
+    }
+  }
+  return [];
+}
+function parsePiratebayHtml(html, domain) {
+  const items = [];
+  const rows = html.split('<tr>').slice(1);
+  for (const row of rows) {
+    if (!row.includes('magnet:?xt=urn:btih:')) continue;
+    const titleM = row.match(/<a[^>]+href="([^"]*\/torrent\/[^"]+)"[^>]*>([^<]+)<\/a>/);
+    if (!titleM) continue;
+    const title = titleM[2].trim();
+    const magM = row.match(/href="(magnet:\?xt=urn:btih:[a-fA-F0-9]{40})/);
+    if (!magM) continue;
+    let date = '';
+    const dateM = row.match(/<td>([\d]{2}-[\d]{2})&nbsp;([\d]{4})<\/td>/);
+    if (dateM) date = `${dateM[2]}-${dateM[1]}`;
+    let size = '';
+    const sizeM = row.match(/<td align="right">([\d.]+)&nbsp;([A-Za-z]+)<\/td>/);
+    if (sizeM) size = sizeM[1] + ' ' + sizeM[2];
+    const nums = [...row.matchAll(/<td align="right">(\d+)<\/td>/g)].map(m => m[1]);
+    const seeders = nums[0] || '';
+    const leechers = nums[1] || '';
+    let detailUrl = titleM[1];
+    if (detailUrl.startsWith('/')) detailUrl = domain.replace(/\/+$/, '') + detailUrl;
+    items.push({
+      name: title,
+      size,
+      date,
+      magnet: simplifyMagnet(magM[1]),
+      detailUrl,
+      source: 'piratebay',
+      seeders,
+      peers: leechers,
+    });
+  }
+  return items;
+}
+
+// ========== therarbg（RARBG 延续，JSON API；多词必须 %20 编码，用 + 会返回 0 条） ==========
+const THERARBG_DOMAINS = ['https://therarbg.com'];
+async function fetchFromTherarbg(query, page, sort, waitUntil) {
+  const cfg = getDomainsConfig().therarbg;
+  const domains = (cfg && cfg.length) ? cfg : THERARBG_DOMAINS;
+  for (const domain of domains) {
+    try {
+      const kw = encodeURIComponent(query).replace(/\+/g, '%20');
+      const url = `${domain}/get-posts/keywords:${kw}/?format=json`;
+      const text = await fetchWithCache(url, 900, waitUntil);
+      let j;
+      try { j = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
+      if (!j || !Array.isArray(j.results)) continue;
+      return j.results
+        .map((r) => ({
+          name: r.n || '',
+          size: formatBytes(Number(r.s) || 0),
+          date: isoFromUnix(r.a),
+          seeds: Number(r.se) || 0,
+          peers: Number(r.le) || 0,
+          magnet: r.h ? `magnet:?xt=urn:btih:${String(r.h).toLowerCase()}` : '',
+          detailUrl: r.pk ? `${domain}/post-detail/${r.pk}/` : '',
+          source: 'therarbg',
+          imdb: r.i || '',
+        }))
+        .filter((it) => it.name && it.magnet);
+    } catch (err) {
+      console.error(`therarbg domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+// ========== EZTV（只能按 imdb_id 查；id 由 fetchFromEztvSmart 从 TPB/therarbg 结果推断） ==========
+const EZTV_DOMAINS = ['https://eztvx.to', 'https://eztv.re', 'https://eztv.tf'];
+async function fetchFromEztv(imdbId, page, sort, waitUntil) {
+  const id = String(imdbId || '').replace(/^tt/i, '');
+  if (!/^\d{5,}$/.test(id)) return [];
+  const cfg = getDomainsConfig().eztv;
+  const domains = (cfg && cfg.length) ? cfg : EZTV_DOMAINS;
+  for (const domain of domains) {
+    try {
+      const url = `${domain}/api/get-torrents?imdb_id=${id}&limit=100&page=${Math.max(1, page || 1)}`;
+      const text = await fetchWithCache(url, 3600, waitUntil);
+      let j;
+      try { j = JSON.parse(text); } catch (e) { throw new Error('JSON解析失败'); }
+      if (!j || !Array.isArray(j.torrents)) continue;
+      return j.torrents
+        .map((t) => ({
+          name: t.title || t.filename || '',
+          size: formatBytes(Number(t.size_bytes) || 0),
+          date: isoFromUnix(t.date_released_unix),
+          seeds: Number(t.seeds) || 0,
+          peers: Number(t.peers) || 0,
+          magnet: t.magnet_url ? simplifyMagnet(t.magnet_url) : '',
+          detailUrl: t.episode_url || '',
+          source: 'eztv',
+        }))
+        .filter((it) => it.name && it.magnet);
+    } catch (err) {
+      console.error(`EZTV domain ${domain} failed:`, err);
+    }
+  }
+  return [];
+}
+
+// EZTV 无关键词搜索：先从带 imdb 的源（TPB/therarbg）收集 imdb_id（取出现最多的），再查 EZTV。
+// 依赖 fetchWithCache：主任务已抓过的话这里直接命中缓存，不重复网络请求。
+async function fetchFromEztvSmart(query, page, sort, waitUntil) {
+  const counts = new Map();
+  for (const fn of [fetchFromTpb, fetchFromTherarbg]) {
+    try {
+      const items = await fn(query, page, sort, waitUntil);
+      for (const it of items) {
+        const id = String(it.imdb || '').replace(/^tt/i, '');
+        if (/^\d{5,}$/.test(id)) counts.set(id, (counts.get(id) || 0) + 1);
+      }
+    } catch (e) { /* 单个源失败不影响推断 */ }
+  }
+  if (!counts.size) return [];
+  let best = '', bestN = 0;
+  for (const [id, n] of counts) {
+    if (n > bestN) { best = id; bestN = n; }
+  }
+  return fetchFromEztv(best, page, sort, waitUntil);
+}
+
+// 供回归测试引用的纯函数（不联网）
+export {
+  normalizeTitle,
+  tokenizeQuery,
+  broadQuery,
+  titleMatchesTokens,
+  parseX1337xRows,
+  parseCilibaikeResults,
+  dedupItems,
+  simplifyMagnet,
+  formatBytes,
+  b64FromUtf8,
+};
+
+// 按需抓取磁力链接：根据 detailUrl 路径模式自动选择正则
+export async function fetchMagnetFromDetailUrl(detailUrl) {
+  if (!detailUrl) return '';
+  try {
+    const html = await fetchWithCache(detailUrl, 3600);
+    let m;
+    // btfox: <input id="mag-link" value="magnet:..."
+    m = html.match(/<input[^>]+id="mag-link"[^>]+value="(magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40})"/);
+    if (m) return simplifyMagnet(m[1]);
+    // zhongziba: <textarea id="magnetLink">magnet:...</textarea>
+    m = html.match(/<textarea[^>]+id="magnetLink"[^>]*>(magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40})/);
+    if (m) return simplifyMagnet(m[1]);
+    // taocili: 直接 magnet:?xt=...
+    if (detailUrl.includes('/magnet/')) {
+      m = html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/);
+      if (m) return simplifyMagnet(m[0]);
+    }
+    // cilichi: 直接 magnet:?xt=...
+    m = html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/);
+    if (m) return simplifyMagnet(m[0]);
+    return '';
+  } catch (e) {
+    return '';
+  }
+}
+
+export async function onRequest(context) {
+  const { request, waitUntil } = context;
+  const url = new URL(request.url);
+  const query = url.searchParams.get('q');
+  const page = parseInt(url.searchParams.get('page') || '1', 10);
+  const sort = url.searchParams.get('sort') || 'relevance';
+  const sourcesParam = url.searchParams.get('sources') || ALL_SOURCE_IDS.join(',');
+  const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
+  if (!query) return new Response(JSON.stringify({ error: 'Missing q' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+  const out = await runSearch({ query, page, sort, sources, waitUntil });
+  return new Response(JSON.stringify(out), { headers: { 'Content-Type': 'application/json' } });
+}
