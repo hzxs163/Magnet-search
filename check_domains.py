@@ -605,6 +605,8 @@ def main():
         'tpb': [],
         'therarbg': [],
         'eztv': [],
+        'btfox': [],
+        'zhongziba': [],
     }
 
     result['xiaocao'] = extract_xiaocao_domains()
@@ -684,6 +686,10 @@ def main():
             print(f'[淘磁力] 提取为空，保留上次的 {len(fallback)} 个域名')
         result['taocili'] = fallback
 
+    # BtFox / 种子吧：无自动发现逻辑，直接保留上次配置
+    result['btfox'] = previous.get('btfox', ['https://btfox20.top', 'https://btfox.xyz'])
+    result['zhongziba'] = previous.get('zhongziba', ['https://zzb10.vip', 'https://seed8.org', 'https://zhongziba.cc'])
+
     OUTPUT_FILE.write_text(
         json.dumps(result, ensure_ascii=False, indent=2),
         encoding='utf-8',
@@ -702,6 +708,8 @@ def main():
     print(f'  TPB: {len(result["tpb"])} 个')
     print(f'  therarbg: {len(result["therarbg"])} 个')
     print(f'  EZTV: {len(result["eztv"])} 个')
+    print(f'  BtFox: {len(result["btfox"])} 个')
+    print(f'  种子吧: {len(result["zhongziba"])} 个')
     if result['cctv10']:
         print('  U3C3 域名:')
         for d in result['cctv10']:
