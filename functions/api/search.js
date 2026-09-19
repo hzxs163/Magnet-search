@@ -23,7 +23,7 @@ export async function onRequest(context) {
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
 
-  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,therarbg,eztv,btfox';
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,therarbg,eztv,btfox,zhongziba';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
 
   if (!query) {
@@ -82,6 +82,9 @@ export async function onRequest(context) {
     }
     if (sources.includes('btfox')) {
       tasks.push({ name: 'btfox', promise: fetchFromBtfox(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('zhongziba')) {
+      tasks.push({ name: 'zhongziba', promise: fetchFromZhongziba(query, page, sort, waitUntil) });
     }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
@@ -182,6 +185,7 @@ function getDomainsConfig() {
     therarbg: Array.isArray(data.therarbg) ? data.therarbg : [],
     eztv: Array.isArray(data.eztv) ? data.eztv : [],
     btfox: Array.isArray(data.btfox) ? data.btfox : [],
+    zhongziba: Array.isArray(data.zhongziba) ? data.zhongziba : [],
   };
 }
 
@@ -945,20 +949,15 @@ async function batchFetchTaociliMagnets(rows, domain, waitUntil) {
 }
 
 // ========== BtFox ==========
-// 普通 HTML 源；关键词无 padding base64；磁力在 /info/{id} 详情页
 async function fetchFromBtfox(query, page, sort, waitUntil) {
-  const domains = getDomainsConfig().btfox.length
-    ? getDomainsConfig().btfox
-    : ['https://btfox20.top'];
+  const domains = getDomainsConfig().btfox.length ? getDomainsConfig().btfox : ['https://btfox20.top'];
   if (domains.length === 0) return [];
-
   const wd = b64FromUtf8(query).replace(/=+$/, '');
   let sortParam = 'time';
   if (sort === 'requests' || sort === 'hits') sortParam = 'hits';
   else if (sort === 'length') sortParam = 'length';
   else if (sort === 'relevance' || sort === 'rele') sortParam = 'rele';
   const pageNum = Math.max(1, page || 1);
-
   for (const domain of domains) {
     try {
       const listUrl = `${domain}/s?wd=${wd}&sort=${sortParam}&page=${pageNum}`;
@@ -966,13 +965,10 @@ async function fetchFromBtfox(query, page, sort, waitUntil) {
       const items = parseBtfoxList(html, domain);
       if (items.length === 0) continue;
       return await batchFetchBtfoxMagnets(items, waitUntil);
-    } catch (err) {
-      console.error(`BtFox domain ${domain} failed:`, err);
-    }
+    } catch (err) { console.error(`BtFox domain ${domain} failed:`, err); }
   }
   return [];
 }
-
 function parseBtfoxList(html, domain) {
   const items = [];
   const blocks = html.split(/<div class="item">/);
@@ -987,7 +983,6 @@ function parseBtfoxList(html, domain) {
     if (!href.includes('/info/')) continue;
     const title = (aMatch[2] || '').replace(/<[^>]+>/g, '').trim();
     if (!title) continue;
-
     const noteMatch = seg.match(/<div class="threadlist_note">([\s\S]*?)<\/div>/);
     let size = '', date = '';
     if (noteMatch) {
@@ -1000,7 +995,6 @@ function parseBtfoxList(html, domain) {
   }
   return items;
 }
-
 async function batchFetchBtfoxMagnets(items, waitUntil) {
   const CONCURRENCY = 5;
   const results = [];
@@ -1013,17 +1007,72 @@ async function batchFetchBtfoxMagnets(items, waitUntil) {
         const html = await fetchWithCache(item.detailUrl, 3600, waitUntil);
         const m = html.match(/<input[^>]+id="mag-link"[^>]+value="(magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40})"/)
           || html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/);
-        if (m) {
-          results.push({
-            name: item.name,
-            size: item.size,
-            date: item.date,
-            magnet: simplifyMagnet(m[1] || m[0]),
-            detailUrl: item.detailUrl,
-            source: 'btfox',
-          });
-        }
-      } catch (e) { /* 单条详情失败跳过 */ }
+        if (m) results.push({ name: item.name, size: item.size, date: item.date, magnet: simplifyMagnet(m[1] || m[0]), detailUrl: item.detailUrl, source: 'btfox' });
+      } catch (e) {}
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker));
+  return results;
+}
+
+// ========== 种子吧 ==========
+async function fetchFromZhongziba(query, page, sort, waitUntil) {
+  const domains = getDomainsConfig().zhongziba.length ? getDomainsConfig().zhongziba : ['https://zzb10.vip'];
+  if (domains.length === 0) return [];
+  const wd = b64FromUtf8(query).replace(/=+$/, '');
+  let sortParam = 'rel';
+  if (sort === 'time' || sort === 'newest') sortParam = 'time';
+  else if (sort === 'requests' || sort === 'hits') sortParam = 'hits';
+  else if (sort === 'length') sortParam = 'size';
+  const pageNum = Math.max(1, page || 1);
+  for (const domain of domains) {
+    try {
+      const listUrl = `${domain}/search?wd=${wd}&sort=${sortParam}&page=${pageNum}`;
+      const html = await fetchWithCache(listUrl, 1800, waitUntil);
+      const items = parseZhongzibaList(html, domain);
+      if (items.length === 0) continue;
+      return await batchFetchZhongzibaMagnets(items, waitUntil);
+    } catch (err) { console.error(`Zhongziba domain ${domain} failed:`, err); }
+  }
+  return [];
+}
+function parseZhongzibaList(html, domain) {
+  const items = [];
+  const blocks = html.split(/<li class="media">/);
+  for (let i = 1; i < blocks.length; i++) {
+    const block = blocks[i];
+    const end = block.indexOf('</li>');
+    const seg = end > 0 ? block.slice(0, end) : block;
+    const aMatch = seg.match(/<a[^>]+href="([^"]+)"[^>]*title="([^"]*)"/);
+    if (!aMatch) continue;
+    let href = aMatch[1].trim();
+    if (!href.startsWith('http')) href = domain.replace(/\/+$/, '') + href;
+    if (!href.includes('/seed/')) continue;
+    const title = (aMatch[2] || '').replace(/<[^>]+>/g, '').trim();
+    if (!title) continue;
+    let size = '', date = '';
+    const dateM = seg.match(/日期[：:]\s*<span[^>]*>(\d{4}-\d{2}-\d{2})<\/span>/);
+    if (dateM) date = dateM[1];
+    const sizeM = seg.match(/大小[：:]\s*<span[^>]*>([\d.]+\s*(?:B|KB|MB|GB|TB))<\/span>/i);
+    if (sizeM) size = sizeM[1].replace(/\s+/g, ' ');
+    items.push({ name: title, size, date, detailUrl: href, source: 'zhongziba' });
+  }
+  return items;
+}
+async function batchFetchZhongzibaMagnets(items, waitUntil) {
+  const CONCURRENCY = 5;
+  const results = [];
+  let idx = 0;
+  const worker = async () => {
+    while (idx < items.length) {
+      const i = idx++;
+      const item = items[i];
+      try {
+        const html = await fetchWithCache(item.detailUrl, 3600, waitUntil);
+        const m = html.match(/<textarea[^>]+id="magnetLink"[^>]*>\s*(magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40})/)
+          || html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/);
+        if (m) results.push({ name: item.name, size: item.size, date: item.date, magnet: simplifyMagnet(m[1] || m[0]), detailUrl: item.detailUrl, source: 'zhongziba' });
+      } catch (e) {}
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker));
