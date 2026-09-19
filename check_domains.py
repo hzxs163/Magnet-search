@@ -605,9 +605,6 @@ def main():
         'tpb': [],
         'therarbg': [],
         'eztv': [],
-        'btfox': [],
-        'zhongziba': [],
-        'cilichi': [],
     }
 
     result['xiaocao'] = extract_xiaocao_domains()
@@ -686,75 +683,6 @@ def main():
         if fallback:
             print(f'[淘磁力] 提取为空，保留上次的 {len(fallback)} 个域名')
         result['taocili'] = fallback
-
-    # ========== BtFox（跟随入口跳转） ==========
-    def extract_btfox_domains():
-        entry = 'https://btfox.xyz'
-        domains = set()
-        print(f'[BtFox] 请求入口: {entry}')
-        try:
-            _, final_url = fetch_url(entry, timeout=15)
-            m = re.match(r'(https?://[^/]+)', final_url)
-            if m:
-                origin = m.group(1).rstrip('/')
-                if is_valid_domain_url(origin):
-                    domains.add(origin)
-                    print(f'[BtFox] 跳转落地: {origin}')
-        except Exception as e:
-            print(f'[BtFox] 入口请求失败: {e}')
-        # 入口域名本身也保留
-        domains.add('https://btfox.xyz')
-        return sorted(domains)
-
-    # ========== 种子吧（跟随入口跳转） ==========
-    def extract_zhongziba_domains():
-        entry = 'https://seed8.org'
-        domains = set()
-        print(f'[种子吧] 请求入口: {entry}')
-        try:
-            _, final_url = fetch_url(entry, timeout=15)
-            m = re.match(r'(https?://[^/]+)', final_url)
-            if m:
-                origin = m.group(1).rstrip('/')
-                if is_valid_domain_url(origin):
-                    domains.add(origin)
-                    print(f'[种子吧] 跳转落地: {origin}')
-        except Exception as e:
-            print(f'[种子吧] 入口请求失败: {e}')
-        domains.add('https://seed8.org')
-        domains.add('https://zhongziba.cc')
-        return sorted(domains)
-
-    # ========== 磁力池（跟随入口跳转） ==========
-    def extract_cilichi_domains():
-        entry = 'https://cilichi.com'
-        domains = set()
-        print(f'[磁力池] 请求入口: {entry}')
-        try:
-            _, final_url = fetch_url(entry, timeout=15)
-            m = re.match(r'(https?://[^/]+)', final_url)
-            if m:
-                origin = m.group(1).rstrip('/')
-                if is_valid_domain_url(origin):
-                    domains.add(origin)
-                    print(f'[磁力池] 跳转落地: {origin}')
-        except Exception as e:
-            print(f'[磁力池] 入口请求失败: {e}')
-        domains.add('https://cilichi.com')
-        domains.add('https://www.cilichi.net')
-        return sorted(domains)
-
-    for name, fn in [('btfox', extract_btfox_domains),
-                     ('zhongziba', extract_zhongziba_domains),
-                     ('cilichi', extract_cilichi_domains)]:
-        found = fn()
-        if found:
-            result[name] = found
-        else:
-            fallback = previous.get(name, [])
-            if fallback:
-                print(f'[{name}] 提取为空，保留上次的 {len(fallback)} 个域名')
-            result[name] = fallback
 
     OUTPUT_FILE.write_text(
         json.dumps(result, ensure_ascii=False, indent=2),
