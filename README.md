@@ -1,6 +1,6 @@
 # MagnetSearch 磁力搜索
 
-聚合 17 个磁力资源搜索源，基于 Cloudflare Pages 免费部署，前端单页无框架。
+聚合 多个磁力资源搜索源，基于 Cloudflare Pages 免费部署，前端单页无框架。
 
 ## 功能
 
