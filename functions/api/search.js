@@ -91,6 +91,9 @@ export async function onRequest(context) {
     }
     if (sources.includes('cilichi')) {
       tasks.push({ name: 'cilichi', promise: fetchFromCilichi(query, page, sort, waitUntil) });
+    if (sources.includes('yts')) {
+      tasks.push({ name: 'yts', promise: fetchFromYts(query, page, sort, waitUntil) });
+    }
     }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
@@ -189,6 +192,7 @@ function getDomainsConfig() {
     taocili: Array.isArray(data.taocili) ? data.taocili : [],
     tpb: Array.isArray(data.tpb) ? data.tpb : [],
     piratebay: Array.isArray(data.piratebay) ? data.piratebay : [],
+    yts: Array.isArray(data.yts) ? data.yts : [],
     therarbg: Array.isArray(data.therarbg) ? data.therarbg : [],
     eztv: Array.isArray(data.eztv) ? data.eztv : [],
     btfox: Array.isArray(data.btfox) ? data.btfox : [],
@@ -1379,4 +1383,44 @@ function jsonResponse(data, status = 200) {
       'Access-Control-Allow-Origin': '*',
     },
   });
+}
+
+// ========== YTS（API JSON） ==========
+async function fetchFromYts(query, page, sort, waitUntil) {
+  const cfg = getDomainsConfig().yts;
+  const domains = (cfg && cfg.length) ? cfg : ['https://yts.lt'];
+  let sortBy = 'date_added';
+  if (sort === 'seeders' || sort === 'hits') sortBy = 'seeds';
+  else if (sort === 'leechers') sortBy = 'peers';
+  else if (sort === 'time' || sort === 'newest') sortBy = 'date_added';
+  const pageNum = Math.max(1, page || 1);
+  for (const domain of domains) {
+    try {
+      const url = `${domain}/api/v2/list_movies.json?query_term=${encodeURIComponent(query)}&limit=20&page=${pageNum}&sort_by=${sortBy}`;
+      const text = await fetchWithCache(url, 900, waitUntil);
+      const data = JSON.parse(text);
+      if (data.status !== 'ok') continue;
+      const movies = (data.data && data.data.movies) || [];
+      const items = [];
+      for (const m of movies) {
+        const torrents = m.torrents || [];
+        for (const t of torrents) {
+          items.push({
+            name: `${m.title} (${m.year}) [${t.quality}]`,
+            size: t.size || '',
+            date: (t.date_uploaded || '').slice(0, 10),
+            magnet: `magnet:?xt=urn:btih:${t.hash}`,
+            detailUrl: m.url || '',
+            source: 'yts',
+            seeds: Number(t.seeds) || 0,
+            peers: Number(t.peers) || 0,
+          });
+        }
+      }
+      if (items.length > 0) return items;
+    } catch (err) {
+      console.error(`YTS domain ${domain} failed:`, err.message);
+    }
+  }
+  return [];
 }
