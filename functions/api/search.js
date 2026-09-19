@@ -1249,8 +1249,18 @@ async function fetchFromPiratebay(query, page, sort, waitUntil) {
       const html = await fetchWithCache(url, 900, waitUntil);
       const items = parsePiratebayHtml(html, domain);
       if (items.length > 0) return items;
+      // 调试：解析为空时返回实际返回内容前300字符
+      return [{
+        name: `[调试] 域名 ${domain} 返回了 ${html.length} 字符，但解析到0条结果`,
+        size: '', date: '', magnet: '', detailUrl: '', source: 'piratebay', seeds: 0, peers: 0,
+        debug: html.slice(0, 300).replace(/</g, '&lt;')
+      }];
     } catch (err) {
       console.error(`Piratebay domain ${domain} failed:`, err.message);
+      return [{
+        name: `[调试] 域名 ${domain} 请求失败: ${err.message}`,
+        size: '', date: '', magnet: '', detailUrl: '', source: 'piratebay', seeds: 0, peers: 0
+      }];
     }
   }
   return [];
