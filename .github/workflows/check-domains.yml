@@ -35,6 +35,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "domains.json 没有变化，跳过提交"
           else
-            git commit -m "chore: update xiaocao domains"
+            git commit -m "chore: update domains"
             git push
           fi
