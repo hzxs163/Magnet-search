@@ -1,0 +1,1001 @@
+#!/usr/bin/env python3
+"""
+域名列表生成脚本
+1. 小草磁力：从 fwonggh/xccl 提取域名
+2. 磁力百科：从中转站页面提取 CONFIG，用算法算出子域名
+3. 虎风（hufeng）：从永久入口 ddcl.me / cltt.me 提取当前落地域名
+4. 雨花阁（yuhuage）：通过 Cloudflare Pages Functions 代理请求 iyuhuage.fun
+5. U3C3（cctv10）：从永久入口 cctv10.cc 提取当前落地域名
+6. 磁力猫（cilimao）：从永久入口 clm.cc / clm.la / cilimao.biz 解码 JS 跳转拿落地域名
+7. 磁力搜（ciliso）：CONFIG 写死，用磁力百科同款算法生成子域名
+8. 淘磁力（taocili）：从发布页 wangzhi.icu/config.js 的「淘磁力」块提取域名，探测可用性
+把生成的域名写入 domains.json，验证交给 Workers 运行时做
+
+依赖：curl_cffi（用于模拟 Chrome TLS 指纹，绕过 WAF 403）
+"""
+
+import base64
+import json
+import re
+import time
+import urllib.request
+import urllib.error
+import ssl
+from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CFFI = True
+except ImportError:
+    HAS_CFFI = False
+
+# ========== 小草磁力 ==========
+XIAOCAO_SOURCE_URL = 'https://raw.githubusercontent.com/fwonggh/xccl/main/index.html'
+
+# ========== 磁力百科中转站 ==========
+CILIBaike_TRANSIT_URL = 'https://xn--tfr084furbf5a.com/'
+ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789'
+
+# ========== 虎风永久入口 ==========
+HUFENG_ENTRY_URLS = [
+    'https://ddcl.me',
+    'https://cltt.me',
+]
+
+HUFENG_DOMAIN_RE = re.compile(r'https?://(?:[\w-]+\.)*(?:hufeng|hf)[\w-]*\.[a-z]{2,}', re.I)
+
+# ========== 雨花阁永久入口 ==========
+YUHUAGE_ENTRY_URLS = [
+    'https://iyuhuage.fun',
+]
+
+YUHUAGE_PROXY_URL = 'https://soubt.pages.dev/proxy/yuhuage'
+
+# ========== U3C3 (cctv10) 永久入口 ==========
+CCTV10_ENTRY_URLS = [
+    'https://cctv10.cc',
+]
+
+# ========== 磁力猫永久入口 ==========
+CILIMAO_ENTRY_URLS = [
+    'https://clm.cc',
+    'https://clm.la',
+    'https://cilimao.biz',
+]
+
+# ========== 淘磁力发布页（wangzhi.icu/config.js 的「淘磁力」块） ==========
+TAOCILI_SOURCE_URL = 'https://wangzhi.icu/config.js'
+TAOCILI_PROBE_Q = 'YXZlbmdlcnM%3D'  # avengers 的 base64(URL编码)，必定有结果
+
+# ========== 磁力搜（cls，写死 CONFIG） ==========
+CILISO_CONFIG = {
+    'domains': ['3030117.xyz', '3030116.xyz', 'cls116.buzz'],
+    'intervalMinutes': 30,
+    'codeLength': 8,
+    'salt': 'address-page-2026',
+}
+
+OUTPUT_FILE = Path(__file__).parent / 'domains.json'
+
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'zh-CN,zh;q=0.9',
+}
+
+VALID_DOMAIN_RE = re.compile(r'^https?://[\w-]+(\.[\w-]+)*\.[a-z]{2,}$', re.I)
+
+
+def is_valid_domain_url(url):
+    return bool(VALID_DOMAIN_RE.match(url.rstrip('/')))
+
+
+# ========== 统一请求层 ==========
+def fetch_url(url, timeout=15, headers=None, impersonate='chrome120'):
+    h = {**HEADERS, **(headers or {})}
+
+    if HAS_CFFI:
+        resp = cffi_requests.get(
+            url,
+            headers=h,
+            timeout=timeout,
+            impersonate=impersonate,
+            allow_redirects=True,
+            verify=False,
+        )
+        return resp.text, str(resp.url)
+    else:
+        req = urllib.request.Request(url, headers=h)
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            return resp.read().decode('utf-8', errors='replace'), resp.geturl()
+
+
+def fetch_text(url, timeout=15, headers=None):
+    text, _ = fetch_url(url, timeout=timeout, headers=headers)
+    return text
+
+
+# ========== 小草磁力 ==========
+def extract_xiaocao_domains():
+    print(f'[小草] 拉取源文件: {XIAOCAO_SOURCE_URL}')
+    try:
+        content = fetch_text(XIAOCAO_SOURCE_URL)
+    except Exception as e:
+        print(f'[小草] 拉取失败: {e}')
+        return []
+
+    print(f'[小草] 源文件长度: {len(content)} 字符')
+
+    domains = set()
+
+    for m in re.findall(r'https://www\.xccl\d+\.xyz', content):
+        domains.add(m)
+
+    from urllib.parse import unquote
+    unescape_matches = re.findall(r'unescape\("([^"]+)"\)', content)
+    for encoded in unescape_matches:
+        try:
+            decoded = unquote(encoded)
+            for m in re.findall(r'https://www\.xccl\d+\.xyz', decoded):
+                domains.add(m)
+        except Exception as e:
+            print(f'[小草] 解码失败: {e}')
+
+    for m in re.findall(r'https://www\.xccl\d+\.xyz', content.replace('\\/', '/')):
+        domains.add(m)
+
+    result = sorted(domains)
+    print(f'[小草] 提取到 {len(result)} 个域名')
+    return result
+
+
+# ========== 磁力百科 ==========
+def extract_cilibaike_config(html):
+    match = re.search(r'const\s+CONFIG\s*=\s*(\{[\s\S]*?\});', html)
+    if not match:
+        print('[磁力百科] 未找到 CONFIG')
+        return None
+
+    js_obj = match.group(1)
+
+    try:
+        js_obj = re.sub(r'(\w+)\s*:', r'"\1":', js_obj)
+        js_obj = js_obj.replace("'", '"')
+        js_obj = re.sub(r',\s*\}', '}', js_obj)
+        js_obj = re.sub(r'//[^\n]*', '', js_obj)
+
+        config = json.loads(js_obj)
+        print(f'[磁力百科] 提取到 CONFIG: {config}')
+        return config
+    except Exception as e:
+        print(f'[磁力百科] CONFIG 解析失败: {e}')
+        print(f'[磁力百科] 原始内容: {js_obj[:200]}')
+        return None
+
+
+def hash32(text):
+    h = 2166136261
+    for ch in text:
+        h ^= ord(ch)
+        h = (h * 16777619) & 0xFFFFFFFF
+    return h
+
+
+def seeded_code(seed_text, length):
+    state = hash32(seed_text) or 1
+    output = ''
+    for _ in range(length):
+        state ^= (state << 13) & 0xFFFFFFFF
+        state ^= state >> 17
+        state ^= (state << 5) & 0xFFFFFFFF
+        state &= 0xFFFFFFFF
+        output += ALPHABET[state % len(ALPHABET)]
+    return output
+
+
+def build_cilibaike_domains(config):
+    domains = config.get('domains', [])
+    interval_minutes = config.get('intervalMinutes', 30)
+    code_length = config.get('codeLength', 8)
+    salt = config.get('salt', '')
+
+    if not domains or not salt:
+        print('[磁力百科] CONFIG 缺少必要字段')
+        return []
+
+    interval_ms = max(1, interval_minutes) * 60000
+    slot = int(time.time() * 1000) // interval_ms
+
+    result = []
+    for i, base in enumerate(domains):
+        code = seeded_code(f'{salt}|{base}|{slot}|{i}', code_length)
+        result.append(f'https://{code}.{base}')
+
+    print(f'[磁力百科] 生成 {len(result)} 个域名 (slot={slot})')
+    return result
+
+
+def get_cilibaike_domains():
+    print(f'[磁力百科] 拉取中转站: {CILIBaike_TRANSIT_URL}')
+    try:
+        html = fetch_text(CILIBaike_TRANSIT_URL)
+    except Exception as e:
+        print(f'[磁力百科] 中转站拉取失败: {e}')
+        return []
+
+    config = extract_cilibaike_config(html)
+    if not config:
+        return []
+
+    return build_cilibaike_domains(config)
+
+
+# ========== 虎风 ==========
+def extract_hufeng_domains():
+    domains = set()
+
+    now = datetime.now()
+    zz_sub = f'{now.month}{now.day}'
+
+    for entry in HUFENG_ENTRY_URLS:
+        print(f'[虎风] 请求入口: {entry}')
+        try:
+            html, final_url = fetch_url(
+                entry,
+                timeout=20,
+                headers={'Referer': entry + '/', 'Accept': '*/*'},
+            )
+            print(f'[虎风] 入口页面长度: {len(html)}')
+            print(f'[虎风] 入口最终 URL: {final_url}')
+
+            m = re.match(r'(https?://[^/]+)', final_url)
+            if m and not any(h.replace('https://', '') in final_url for h in HUFENG_ENTRY_URLS):
+                url = m.group(1).rstrip('/')
+                if 'hufeng' in url or '.hf' in url:
+                    domains.add(url)
+                    print(f'[虎风] HTTP 跳转到: {url}')
+
+            entry_b64 = base64.b64encode(entry.encode()).decode()
+            api_suffixes = []
+            for b64 in re.findall(r'atob\([\'"]([^\'"]+)[\'"]\)', html):
+                try:
+                    decoded = base64.b64decode(b64).decode('utf-8', errors='replace')
+                    api_suffixes.append(decoded)
+                except Exception:
+                    pass
+            print(f'[虎风] 解出的 api 后缀: {api_suffixes}')
+
+            for suffix in api_suffixes:
+                api_url = f'https://gn{zz_sub}{suffix}/api.JS?1,{entry_b64}'
+                print(f'[虎风] 请求 api.JS: {api_url}')
+                try:
+                    js, _ = fetch_url(
+                        api_url,
+                        timeout=20,
+                        headers={'Referer': entry + '/', 'Accept': '*/*'},
+                    )
+                    print(f'[虎风] api.JS 返回长度: {len(js)}')
+
+                    for b64 in re.findall(r'atob\([\'"]([^\'"]+)[\'"]\)', js):
+                        try:
+                            decoded = base64.b64decode(b64).decode('utf-8', errors='replace')
+                            decoded = decoded.replace('|', '.')
+                            for m in re.findall(r'https?://[a-z0-9.-]+\.[a-z]{2,}', decoded, re.I):
+                                host = m.split('//')[1].lower()
+                                if host.startswith('gn') or 'jumpcdn' in host or 'xn--r8s65df7admf92a' in host:
+                                    continue
+                                domains.add(m)
+                        except Exception:
+                            pass
+
+                    for m in HUFENG_DOMAIN_RE.findall(js):
+                        domains.add(m)
+
+                except Exception as e:
+                    print(f'[虎风] api.JS 请求失败: {e}')
+
+            for m in re.findall(r'http-equiv=["\']?refresh["\']?[^>]*content=["\']?[^;]+;\s*url=([^"\'>\s]+)', html, re.I):
+                mm = re.match(r'(?:https?:)?//([^/]+)', m)
+                if mm:
+                    url = f'https://{mm.group(1)}'.rstrip('/')
+                    if is_valid_domain_url(url):
+                        domains.add(url)
+
+            for m in re.findall(r'(?:location\.href|location\.replace|location\.assign)\s*[=(]\s*["\']([^"\']+)', html, re.I):
+                mm = re.match(r'(?:https?:)?//([^/]+)', m)
+                if mm:
+                    url = f'https://{mm.group(1)}'.rstrip('/')
+                    if is_valid_domain_url(url):
+                        domains.add(url)
+
+            for m in re.findall(r'(?:https?:)?//([\w.-]*(?:hufeng|hf)[\w.-]*\.[a-z]{2,})', html, re.I):
+                url = f'https://{m}'.rstrip('/')
+                if is_valid_domain_url(url):
+                    domains.add(url)
+
+        except Exception as e:
+            print(f'[虎风] 入口 {entry} 失败: {e}')
+
+    result = sorted(
+        d for d in domains
+        if not any(entry_host in d for entry_host in HUFENG_ENTRY_URLS)
+        and 'jumpcdn' not in d
+        and 'xn--r8s65df7admf92a' not in d
+        and is_valid_domain_url(d)
+    )
+    print(f'[虎风] 提取到 {len(result)} 个落地域名')
+    for d in result:
+        print(f'    - {d}')
+    return result
+
+
+# ========== 雨花阁（走 Pages 代理） ==========
+def extract_yuhuage_domains():
+    domains = set()
+
+    print(f'[雨花阁] 通过代理请求: {YUHUAGE_PROXY_URL}')
+    try:
+        text, _ = fetch_url(YUHUAGE_PROXY_URL, timeout=20)
+        data = json.loads(text)
+        print(f'[雨花阁] 代理返回 status={data.get("status")} location={data.get("location")}')
+
+        loc = data.get('location')
+        if loc:
+            m = re.match(r'(https?://[^/]+)', loc)
+            if m:
+                url = m.group(1).rstrip('/')
+                if is_valid_domain_url(url) and not any(h.replace('https://', '') in url for h in YUHUAGE_ENTRY_URLS):
+                    domains.add(url)
+                    print(f'[雨花阁] Location 拿到: {url}')
+
+        body = data.get('body', '')
+
+        for m in re.findall(r'<meta[^>]+url=([^"\'>\s]+)', body, re.I):
+            mm = re.match(r'(?:https?:)?//([^/]+)', m)
+            if mm:
+                url = f'https://{mm.group(1)}'.rstrip('/')
+                if is_valid_domain_url(url) and not any(h.replace('https://', '') in url for h in YUHUAGE_ENTRY_URLS):
+                    domains.add(url)
+                    print(f'[雨花阁] meta 解析到: {url}')
+
+        for m in re.findall(r'(?:location\.href|location\.replace|location\.assign)\s*[=(]\s*["\']([^"\']+)', body, re.I):
+            mm = re.match(r'(?:https?:)?//([^/]+)', m)
+            if mm:
+                url = f'https://{mm.group(1)}'.rstrip('/')
+                if is_valid_domain_url(url) and not any(h.replace('https://', '') in url for h in YUHUAGE_ENTRY_URLS):
+                    domains.add(url)
+
+        for m in re.findall(r'(?:https?:)?//([\w.-]*yuhuage[\w.-]*\.[a-z]{2,})', body, re.I):
+            url = f'https://{m}'.rstrip('/')
+            if is_valid_domain_url(url) and not any(h.replace('https://', '') in url for h in YUHUAGE_ENTRY_URLS):
+                domains.add(url)
+
+    except Exception as e:
+        print(f'[雨花阁] 代理请求失败: {e}')
+
+    result = sorted(domains)
+    print(f'[雨花阁] 提取到 {len(result)} 个落地域名')
+    for d in result:
+        print(f'    - {d}')
+    return result
+
+
+# ========== U3C3 (cctv10) ==========
+def extract_cctv10_domains():
+    domains = set()
+
+    for entry in CCTV10_ENTRY_URLS:
+        print(f'[cctv10] 请求入口: {entry}')
+        try:
+            html, final_url = fetch_url(entry, timeout=20)
+            print(f'[cctv10] 最终 URL: {final_url}')
+            print(f'[cctv10] 页面长度: {len(html)}')
+
+            m = re.match(r'(https?://[^/]+)', final_url)
+            if m:
+                url = m.group(1).rstrip('/')
+                if not any(h.replace('https://', '') in url for h in CCTV10_ENTRY_URLS):
+                    if is_valid_domain_url(url):
+                        domains.add(url)
+                        print(f'[cctv10] HTTP 跳转到: {url}')
+
+            for m in re.findall(r'(?:https?:)?//([\w.-]*cctv10[\w.-]*\.[a-z]{2,})', html, re.I):
+                url = f'https://{m}'.rstrip('/')
+                if is_valid_domain_url(url) and not any(h.replace('https://', '') in url for h in CCTV10_ENTRY_URLS):
+                    domains.add(url)
+
+        except Exception as e:
+            print(f'[cctv10] 入口 {entry} 失败: {e}')
+
+    result = sorted(domains)
+    print(f'[cctv10] 提取到 {len(result)} 个落地域名')
+    for d in result:
+        print(f'    - {d}')
+    return result
+
+
+# ========== 磁力猫 ==========
+def extract_cilimao_domains():
+    """磁力猫：入口用 JS 跳转，需解码 atob 内容提取目标域名。"""
+    from urllib.parse import unquote
+
+    domains = set()
+
+    for entry in CILIMAO_ENTRY_URLS:
+        print(f'[磁力猫] 请求入口: {entry}')
+        try:
+            html, final_url = fetch_url(entry, timeout=20)
+            print(f'[磁力猫] 最终 URL: {final_url}')
+            print(f'[磁力猫] 页面长度: {len(html)}')
+
+            # 1) HTTP 跳转
+            m = re.match(r'(https?://[^/]+)', final_url)
+            if m:
+                url = m.group(1).rstrip('/')
+                if not any(h.replace('https://', '') in url for h in CILIMAO_ENTRY_URLS):
+                    if is_valid_domain_url(url):
+                        domains.add(url)
+                        print(f'[磁力猫] HTTP 跳转到: {url}')
+
+            # 2) JS 跳转：从 atob 解码里提取 location.href
+            for m in re.findall(r'window\.atob\("([^"]+)"\)', html):
+                try:
+                    decoded = base64.b64decode(m).decode('utf-8')
+                    decoded = unquote(decoded)
+                    for mm in re.findall(r"location\.href\s*=\s*['\"]([^'\"]+)['\"]", decoded):
+                        url = mm.strip().rstrip('/')
+                        if not url.startswith('http'):
+                            continue
+                        m2 = re.match(r'(https?://[^/]+)', url)
+                        if m2:
+                            host = m2.group(1).rstrip('/')
+                            if not any(h.replace('https://', '') in host for h in CILIMAO_ENTRY_URLS):
+                                if is_valid_domain_url(host):
+                                    domains.add(host)
+                                    print(f'[磁力猫] JS 跳转到: {host}')
+                except Exception as e:
+                    print(f'[磁力猫] atob 解码失败: {e}')
+
+            # 3) 兜底：HTML 里找 clm/cilimao 域名
+            for m in re.findall(r'(?:https?:)?//([\w.-]*(?:clm|cilimao)[\w.-]*\.[a-z]{2,})', html, re.I):
+                url = f'https://{m}'.rstrip('/')
+                if is_valid_domain_url(url) and not any(h.replace('https://', '') in url for h in CILIMAO_ENTRY_URLS):
+                    domains.add(url)
+
+        except Exception as e:
+            print(f'[磁力猫] 入口 {entry} 失败: {e}')
+
+    result = sorted(domains)
+    print(f'[磁力猫] 提取到 {len(result)} 个落地域名')
+    for d in result:
+        print(f'    - {d}')
+    return result
+
+
+# ========== 磁力搜（cls） ==========
+def get_ciliso_domains():
+    """磁力搜：CONFIG 写死，用磁力百科同款算法生成子域名。"""
+    print(f'[磁力搜] 使用写死的 CONFIG: {CILISO_CONFIG}')
+    return build_cilibaike_domains(CILISO_CONFIG)
+
+
+def extract_taocili_domains():
+    """淘磁力：从发布页 wangzhi.icu/config.js 的「淘磁力」块提取域名，
+    逐个用内部搜索 API 探测可用性（能返回 code=0 + items 才算可用）。"""
+    print(f'[淘磁力] 拉取发布页配置: {TAOCILI_SOURCE_URL}')
+    try:
+        text = fetch_text(TAOCILI_SOURCE_URL, timeout=20)
+    except Exception as e:
+        print(f'[淘磁力] 发布页拉取失败: {e}')
+        return []
+
+    # config.js 形如：{ id: 'cl', name: '淘磁力', urls: ['https://...', ...] }
+    # 按顶层 { } 块切分（对象内无嵌套花括号），只取 name 含「淘磁力」的块
+    taocili_block = None
+    for b in re.findall(r'\{[^{}]*\}', text):
+        if '淘磁力' in b:
+            taocili_block = b
+            break
+    if not taocili_block:
+        print('[淘磁力] 未在发布页找到淘磁力块')
+        return []
+    candidates = re.findall(r'https?://[a-zA-Z0-9][a-zA-Z0-9.\-]*\.[a-z]{2,}', taocili_block, re.I)
+    candidates = list(dict.fromkeys(c.rstrip('/') for c in candidates if is_valid_domain_url(c.rstrip('/'))))
+    print(f'[淘磁力] 发布页候选域名: {candidates}')
+    if not candidates:
+        return []
+
+    ok = []
+    for domain in candidates:
+        try:
+            url = f'{domain}/apis/search?keyword={TAOCILI_PROBE_Q}&base64=1&detail=1&start=0&count=1&type=all&sort=default'
+            text = fetch_text(url, timeout=12)
+            data = json.loads(text)
+            if data.get('code') == 0 and data.get('items'):
+                ok.append(domain)
+                print(f'[淘磁力] {domain} 可用')
+            else:
+                print(f'[淘磁力] {domain} 无结果，跳过')
+        except Exception as e:
+            print(f'[淘磁力] {domain} 探测失败: {e}')
+    return ok
+
+
+# ========== TPB（apibay 官方 API） ==========
+def extract_tpb_domains():
+    """TPB：apibay.org 官方 API 探测（返回含 info_hash 的真实记录即可用）。"""
+    try:
+        text = fetch_text('https://apibay.org/q.php?q=avengers&cat=0', timeout=12)
+        arr = json.loads(text)
+        if isinstance(arr, list) and any(
+            isinstance(x, dict) and x.get('id') != '0' and x.get('info_hash') for x in arr
+        ):
+            print('[TPB] apibay.org 可用')
+            return ['https://apibay.org']
+    except Exception as e:
+        print(f'[TPB] 探测失败: {e}')
+    return []
+
+
+
+# ========== piratebay（海盗湾 HTML 版，从 piratebayproxy.info 提取可用域名） ==========
+def extract_piratebay_domains():
+    """从 piratebayproxy.info 提取 thepiratebay.* 镜像域名，逐个探测搜索页可用。"""
+    try:
+        html = fetch_text('https://piratebayproxy.info/', timeout=12)
+        found = sorted(set(re.findall(r'https?://(thepiratebay\.[a-z0-9.-]+)', html)))
+        for host in found:
+            try:
+                url = f'https://{host}/search/test/1/99/0'
+                text = fetch_text(url, timeout=10)
+                if 'magnet:?xt=urn:btih' in text:
+                    print(f'[piratebay] {host} 可用')
+                    return [f'https://{host}']
+            except Exception:
+                continue
+        # 探测失败就返回第一个作为候选
+        if found:
+            print(f'[piratebay] 探测失败，使用第一个候选: {found[0]}')
+            return [f'https://{found[0]}']
+    except Exception as e:
+        print(f'[piratebay] 提取失败: {e}')
+    return []
+
+
+# ========== therarbg（RARBG 延续，JSON API） ==========
+def extract_therarbg_domains():
+    """therarbg：JSON API 探测（keywords 多词必须 %20 编码，用 + 会返回 0 条）。"""
+    try:
+        text = fetch_text('https://therarbg.com/get-posts/keywords:avengers/?format=json', timeout=12)
+        j = json.loads(text)
+        if isinstance(j, dict) and isinstance(j.get('results'), list) and len(j['results']) > 0:
+            print('[therarbg] therarbg.com 可用')
+            return ['https://therarbg.com']
+    except Exception as e:
+        print(f'[therarbg] 探测失败: {e}')
+    return []
+
+
+# ========== EZTV（镜像 API 探测） ==========
+EZTV_CANDIDATES = ['https://eztvx.to', 'https://eztv.re', 'https://eztv.tf']
+def extract_eztv_domains():
+    """EZTV：镜像 API 按 imdb 探测（可用最多收录 2 个）。"""
+    ok = []
+    for d in EZTV_CANDIDATES:
+        try:
+            text = fetch_text(f'{d}/api/get-torrents?imdb_id=tt0108778&limit=1&page=1', timeout=12)
+            j = json.loads(text)
+            if isinstance(j, dict) and isinstance(j.get('torrents'), list) and len(j['torrents']) > 0:
+                ok.append(d)
+                print(f'[EZTV] {d} 可用')
+                if len(ok) >= 2:
+                    break
+            else:
+                print(f'[EZTV] {d} 无结果，跳过')
+        except Exception as e:
+            print(f'[EZTV] {d} 探测失败: {e}')
+    return ok
+
+
+def load_previous_domains():
+    if not OUTPUT_FILE.exists():
+        return {}
+    try:
+        return json.loads(OUTPUT_FILE.read_text(encoding='utf-8'))
+    except Exception as e:
+        print(f'[保底] 读取旧 domains.json 失败: {e}')
+        return {}
+
+
+def main():
+    if not HAS_CFFI:
+        print('⚠️  未安装 curl_cffi，回退到 urllib。建议 pip install curl_cffi 以过 WAF。')
+
+    previous = load_previous_domains()
+
+    result = {
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+        'xiaocao': [],
+        'cilibaike': [],
+        'hufeng': [],
+        'yuhuage': [],
+        'cctv10': [],
+        'cilimao': [],
+        'ciliso': [],
+        'taocili': [],
+        'tpb': [],
+        'piratebay': [],
+        'therarbg': [],
+        'eztv': [],
+        'btfox': [],
+        'zhongziba': [],
+        'cilichi': [],
+        'yts': [],
+        'miaocili': [],
+        'xcisou': [],
+        'tpbweb': [],
+        'torrentgalaxy': [],
+        'filemood': [],
+    }
+
+    result['xiaocao'] = extract_xiaocao_domains()
+    result['cilibaike'] = get_cilibaike_domains()
+
+    hufeng_domains = extract_hufeng_domains()
+    if hufeng_domains:
+        result['hufeng'] = hufeng_domains
+    else:
+        fallback = previous.get('hufeng', [])
+        if fallback:
+            print(f'[虎风] 提取为空，保留上次的 {len(fallback)} 个域名')
+        result['hufeng'] = fallback
+
+    yuhuage_domains = extract_yuhuage_domains()
+    if yuhuage_domains:
+        result['yuhuage'] = yuhuage_domains
+    else:
+        fallback = previous.get('yuhuage', [])
+        if fallback:
+            print(f'[雨花阁] 提取为空，保留上次的 {len(fallback)} 个域名')
+        result['yuhuage'] = fallback
+
+    cctv10_domains = extract_cctv10_domains()
+    if cctv10_domains:
+        result['cctv10'] = cctv10_domains
+    else:
+        fallback = previous.get('cctv10', [])
+        if fallback:
+            print(f'[cctv10] 提取为空，保留上次的 {len(fallback)} 个域名')
+        result['cctv10'] = fallback
+
+    cilimao_domains = extract_cilimao_domains()
+    if cilimao_domains:
+        result['cilimao'] = cilimao_domains
+    else:
+        fallback = previous.get('cilimao', [])
+        if fallback:
+            print(f'[磁力猫] 提取为空，保留上次的 {len(fallback)} 个域名')
+        result['cilimao'] = fallback
+
+    result['ciliso'] = get_ciliso_domains()
+
+    tpb_domains = extract_tpb_domains()
+    if tpb_domains:
+        result['tpb'] = tpb_domains
+    else:
+        fallback = previous.get('tpb', [])
+        if fallback:
+            print(f'[TPB] 提取为空，保留上次的 {len(fallback)} 个域名')
+        result['tpb'] = fallback
+
+    therarbg_domains = extract_therarbg_domains()
+    if therarbg_domains:
+        result['therarbg'] = therarbg_domains
+    else:
+        fallback = previous.get('therarbg', [])
+        if fallback:
+            print(f'[therarbg] 提取为空，保留上次的 {len(fallback)} 个域名')
+        result['therarbg'] = fallback
+
+    eztv_domains = extract_eztv_domains()
+    if eztv_domains:
+        result['eztv'] = eztv_domains
+    else:
+        fallback = previous.get('eztv', [])
+        if fallback:
+            print(f'[EZTV] 提取为空，保留上次的 {len(fallback)} 个域名')
+        result['eztv'] = fallback
+
+    taocili_domains = extract_taocili_domains()
+    if taocili_domains:
+        result['taocili'] = taocili_domains
+    else:
+        fallback = previous.get('taocili', [])
+        if fallback:
+            print(f'[淘磁力] 提取为空，保留上次的 {len(fallback)} 个域名')
+        result['taocili'] = fallback
+
+    # ========== BtFox（跟随入口跳转） ==========
+    def extract_btfox_domains():
+        entry = 'https://btfox.xyz'
+        domains = set()
+        print(f'[BtFox] 请求入口: {entry}')
+        try:
+            _, final_url = fetch_url(entry, timeout=15)
+            m = re.match(r'(https?://[^/]+)', final_url)
+            if m:
+                origin = m.group(1).rstrip('/')
+                if is_valid_domain_url(origin):
+                    domains.add(origin)
+                    print(f'[BtFox] 跳转落地: {origin}')
+        except Exception as e:
+            print(f'[BtFox] 入口请求失败: {e}')
+        # 入口域名本身也保留
+        domains.add('https://btfox.xyz')
+        return sorted(domains)
+
+    # ========== 种子吧（跟随入口跳转） ==========
+    def extract_zhongziba_domains():
+        entry = 'https://seed8.org'
+        domains = set()
+        print(f'[种子吧] 请求入口: {entry}')
+        try:
+            _, final_url = fetch_url(entry, timeout=15)
+            m = re.match(r'(https?://[^/]+)', final_url)
+            if m:
+                origin = m.group(1).rstrip('/')
+                if is_valid_domain_url(origin):
+                    domains.add(origin)
+                    print(f'[种子吧] 跳转落地: {origin}')
+        except Exception as e:
+            print(f'[种子吧] 入口请求失败: {e}')
+        domains.add('https://seed8.org')
+        domains.add('https://zhongziba.cc')
+        return sorted(domains)
+
+    # ========== 磁力池（跟随入口跳转） ==========
+    def extract_cilichi_domains():
+        entry = 'https://cilichi.com'
+        domains = set()
+        print(f'[磁力池] 请求入口: {entry}')
+        try:
+            _, final_url = fetch_url(entry, timeout=15)
+            m = re.match(r'(https?://[^/]+)', final_url)
+            if m:
+                origin = m.group(1).rstrip('/')
+                if is_valid_domain_url(origin):
+                    domains.add(origin)
+                    print(f'[磁力池] 跳转落地: {origin}')
+        except Exception as e:
+            print(f'[磁力池] 入口请求失败: {e}')
+        domains.add('https://cilichi.com')
+        domains.add('https://www.cilichi.net')
+        return sorted(domains)
+
+    # ========== YTS（API JSON） ==========
+    def extract_yts_domains():
+        try:
+            text = fetch_text('https://yts.lt/api/v2/list_movies.json?query_term=test&limit=5', timeout=12)
+            j = json.loads(text)
+            if j.get('status') == 'ok':
+                print('[yts] yts.lt 可用')
+                return ['https://yts.lt']
+        except Exception as e:
+            print(f'[yts] 探测失败: {e}')
+        return []
+
+    # ========== 喵磁力（关键词 hex 编码） ==========
+    def extract_miaocili_domains():
+        try:
+            text = fetch_text('https://www.miaocili.org/search/74657374_1_id.html', timeout=12)  # test
+            if 'search-item' in text:
+                print('[喵磁力] www.miaocili.org 可用')
+                return ['https://www.miaocili.org']
+        except Exception as e:
+            print(f'[喵磁力] 探测失败: {e}')
+        return []
+
+    # ========== x磁搜（xcisou.com / xbtbt.com / x磁搜.com 均跳转 search.cisoux.com） ==========
+    def extract_xcisou_domains():
+        entries = ['https://xcisou.com', 'https://xbtbt.com', 'https://xn--x-jg1j3y.com']
+        domains = set()
+        for entry in entries:
+            print(f'[x磁搜] 请求入口: {entry}')
+            try:
+                _, final_url = fetch_url(entry, timeout=15)
+                m = re.match(r'(https?://[^/]+)', final_url)
+                if m:
+                    origin = m.group(1).rstrip('/')
+                    if is_valid_domain_url(origin):
+                        domains.add(origin)
+                        print(f'[x磁搜] 跳转落地: {origin}')
+            except Exception as e:
+                print(f'[x磁搜] 入口请求失败: {e}')
+        if domains:
+            for origin in sorted(domains):
+                try:
+                    text = fetch_text(f'{origin}/search/test/all/relevance/any/1', timeout=10)
+                    if 'result-item' in text:
+                        print(f'[x磁搜] {origin} 搜索页可用')
+                        return [origin]
+                except Exception:
+                    continue
+            return sorted(domains)
+        return ['https://search.cisoux.com']
+
+    # ========== FileMood（fmhy.net/torrenting 提取，逐个探测 /result?q= 结果行） ==========
+    def extract_filemood_domains():
+        candidates = set()
+        try:
+            req = urllib.request.Request('https://fmhy.net/torrenting', headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', 'Accept': 'text/html,*/*'})
+            html = urllib.request.urlopen(req, timeout=15).read().decode('utf-8', 'ignore')
+            for m in re.finditer(r'https?://(?:www\.)?filemood\.[a-zA-Z0-9.-]+', html):
+                dom = m.group(0).rstrip('/')
+                if dom not in candidates:
+                    candidates.add(dom)
+        except Exception as e:
+            print('  [FileMood] 获取 fmhy.net/torrenting 失败:', e)
+        alive = []
+        for dom in sorted(candidates):
+            try:
+                req = urllib.request.Request(dom + '/result?q=test', headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'})
+                html = urllib.request.urlopen(req, timeout=12).read().decode('utf-8', 'ignore')
+                if 'dn-title' in html or 'filedir' in html:
+                    alive.append(dom)
+                    print(f'  [FileMood] {dom} 可用')
+                else:
+                    print(f'  [FileMood] {dom} 无结果结构，跳过')
+            except Exception as e:
+                print(f'  [FileMood] {dom} 不可用: {e}')
+        if not alive:
+            print('  [FileMood] 未找到可用域名，保留上次')
+            return []
+        return alive
+
+    # ========== 海盗湾 tpbweb（knaben.info 提取镜像，逐个探测 api.php JSON） ==========
+    def extract_tpbweb_domains():
+        try:
+            html = fetch_text('https://knaben.info/', timeout=15)
+            found = sorted(set(re.findall(r'https?://(?:www\\.)?(?:thepiratebay|tpb|mirrorbay)[a-z0-9.-]*', html)))
+            ok = []
+            for d in found:
+                try:
+                    text = fetch_text(f'{d}/api.php?url=/q.php?q=test&cat=', timeout=10, headers={'Accept': 'application/json'})
+                    j = json.loads(text)
+                    arr = j if isinstance(j, list) else (j.get('results') if isinstance(j, dict) else [])
+                    if isinstance(arr, list) and len(arr) > 0:
+                        print(f'[海盗湾] {d} 可用')
+                        ok.append(d)
+                except Exception as e:
+                    print(f'[海盗湾] {d} 探测失败: {e}')
+            return ok
+        except Exception as e:
+            print(f'[海盗湾] knaben.info 提取失败: {e}')
+        return []
+
+    # ========== TorrentGalaxy（WordPress JSON API） ==========
+    def extract_torrentgalaxy_domains():
+        candidates = ['https://torrentgalaxy.info', 'https://torrentgalaxy.one']
+        domains = []
+        for d in candidates:
+            try:
+                text = fetch_text(f'{d}/get-posts/keywords:test/?format=json', timeout=12)
+                j = json.loads(text)
+                if isinstance(j, dict) and isinstance(j.get('results'), list) and len(j['results']) > 0:
+                    print(f'[TorrentGalaxy] {d} 可用')
+                    domains.append(d)
+            except Exception as e:
+                print(f'[TorrentGalaxy] {d} 探测失败: {e}')
+        return domains
+
+    for name, fn in [('btfox', extract_btfox_domains),
+                     ('zhongziba', extract_zhongziba_domains),
+                     ('cilichi', extract_cilichi_domains),
+                     ('yts', extract_yts_domains),
+                     ('miaocili', extract_miaocili_domains),
+                     ('xcisou', extract_xcisou_domains),
+                     ('tpbweb', extract_tpbweb_domains),
+                     ('torrentgalaxy', extract_torrentgalaxy_domains),
+                     ('filemood', extract_filemood_domains)]:
+        found = fn()
+        if found:
+            result[name] = found
+        else:
+            fallback = previous.get(name, [])
+            if fallback:
+                print(f'[{name}] 提取为空，保留上次的 {len(fallback)} 个域名')
+            result[name] = fallback
+
+    OUTPUT_FILE.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2),
+        encoding='utf-8',
+    )
+
+    print()
+    print(f'已写入 {OUTPUT_FILE}')
+    print(f'  小草磁力: {len(result["xiaocao"])} 个')
+    print(f'  磁力百科: {len(result["cilibaike"])} 个')
+    print(f'  虎风: {len(result["hufeng"])} 个')
+    print(f'  雨花阁: {len(result["yuhuage"])} 个')
+    print(f'  U3C3: {len(result["cctv10"])} 个')
+    print(f'  磁力猫: {len(result["cilimao"])} 个')
+    print(f'  磁力搜: {len(result["ciliso"])} 个')
+    print(f'  淘磁力: {len(result["taocili"])} 个')
+    print(f'  TPB: {len(result["tpb"])} 个')
+    print(f'  海盗湾HTML: {len(result["piratebay"])} 个')
+    print(f'  therarbg: {len(result["therarbg"])} 个')
+    print(f'  EZTV: {len(result["eztv"])} 个')
+    print(f'  YTS: {len(result["yts"])} 个')
+    print(f'  喵磁力: {len(result["miaocili"])} 个')
+    print(f'  x磁搜: {len(result["xcisou"])} 个')
+    print(f'  海盗湾: {len(result["tpbweb"])} 个')
+    print(f'  TorrentGalaxy: {len(result["torrentgalaxy"])} 个')
+    print(f'  FileMood: {len(result["filemood"])} 个')
+    if result['cctv10']:
+        print('  U3C3 域名:')
+        for d in result['cctv10']:
+            print(f'    - {d}')
+    if result['cilimao']:
+        print('  磁力猫域名:')
+        for d in result['cilimao']:
+            print(f'    - {d}')
+    if result['ciliso']:
+        print('  磁力搜域名:')
+        for d in result['ciliso']:
+            print(f'    - {d}')
+    if result['taocili']:
+        print('  淘磁力域名:')
+        for d in result['taocili']:
+            print(f'    - {d}')
+    if result['piratebay']:
+        print('  海盗湾HTML域名:')
+        for d in result['piratebay']:
+            print(f'    - {d}')
+    if result['tpb']:
+        print('  TPB域名:')
+        for d in result['tpb']:
+            print(f'    - {d}')
+    if result['therarbg']:
+        print('  therarbg域名:')
+        for d in result['therarbg']:
+            print(f'    - {d}')
+    if result['eztv']:
+        print('  EZTV域名:')
+        for d in result['eztv']:
+            print(f'    - {d}')
+
+    if result['yts']:
+        print('  YTS域名:')
+        for d in result['yts']:
+            print(f'    - {d}')
+    if result['miaocili']:
+        print('  喵磁力域名:')
+        for d in result['miaocili']:
+            print(f'    - {d}')
+    if result['xcisou']:
+        print('  x磁搜域名:')
+        for d in result['xcisou']:
+            print(f'    - {d}')
+
+    if result['torrentgalaxy']:
+        print('  TorrentGalaxy域名:')
+        for d in result['torrentgalaxy']:
+            print(f'    - {d}')
+
+    if result['filemood']:
+        print('  FileMood域名:')
+        for d in result['filemood']:
+            print(f'    - {d}')
+
+    if result['tpbweb']:
+        print('  海盗湾域名:')
+        for d in result['tpbweb']:
+            print(f'    - {d}')
+
+
+if __name__ == '__main__':
+    main()

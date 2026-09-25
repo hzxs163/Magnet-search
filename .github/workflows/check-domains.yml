@@ -1,0 +1,40 @@
+name: 域名定时更新工作流
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  # 允许手动触发
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install curl_cffi
+
+      - name: Extract domains
+        run: python check_domains.py
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add domains.json
+          if git diff --staged --quiet; then
+            echo "domains.json 没有变化，跳过提交"
+          else
+            git commit -m "chore: update xiaocao domains"
+            git push
+          fi
