@@ -14,6 +14,7 @@
 依赖：curl_cffi（用于模拟 Chrome TLS 指纹，绕过 WAF 403）
 """
 
+import array  # UTF-16 码元 <-> 字节，用于还原 xccl 的 document.write 载荷
 import base64
 import json
 import re
@@ -120,6 +121,50 @@ def fetch_text(url, timeout=15, headers=None):
 
 
 # ========== 小草磁力 ==========
+_XCCL_HEX2 = re.compile(r'[0-9a-fA-F]{2}')
+_XCCL_HEX4 = re.compile(r'[0-9a-fA-F]{4}')
+
+
+def _js_unescape_units(s):
+    """按 JS unescape() 的语义把百分号串还原成 UTF-16 码元列表。
+
+    不能用 urllib.parse.unquote：它把 %XX 当 UTF-8 字节序列解码，而 unescape 是把 %XX 直接
+    当成一个码元（等价于 Latin-1），两者对 >0x7F 的转义结果完全不同。
+    """
+    units = []
+    i, n = 0, len(s)
+    while i < n:
+        if s[i] == '%' and i + 1 < n:
+            if s[i + 1] in 'uU' and i + 6 <= n and _XCCL_HEX4.match(s, i + 2):
+                units.append(int(s[i + 2:i + 6], 16))
+                i += 6
+                continue
+            if i + 3 <= n and _XCCL_HEX2.match(s, i + 1):
+                units.append(int(s[i + 1:i + 3], 16))
+                i += 3
+                continue
+        cp = ord(s[i])
+        if cp <= 0xFFFF:
+            units.append(cp)
+        else:
+            cp -= 0x10000
+            units.append(0xD800 + (cp >> 10))
+            units.append(0xDC00 + (cp & 0x3FF))
+        i += 1
+    return units
+
+
+def _decode_xccl(packed):
+    """还原 xccl 页面里的 document.write 载荷：先 unescape，再做一次差分还原。"""
+    a = _js_unescape_units(packed)
+    if not a:
+        return ''
+    out = [(a[0] - len(a)) & 0xFFFF]
+    for i in range(1, len(a)):
+        out.append((a[i] - out[-1]) & 0xFFFF)
+    return array.array('H', out).tobytes().decode('utf-16-le', errors='replace')
+
+
 def extract_xiaocao_domains():
     print(f'[小草] 拉取源文件: {XIAOCAO_SOURCE_URL}')
     try:
@@ -132,21 +177,28 @@ def extract_xiaocao_domains():
 
     domains = set()
 
-    for m in re.findall(r'https://www\.xccl\d+\.xyz', content):
-        domains.add(m)
+    for source in (content, content.replace('\\/', '/')):
+        for m in re.findall(r'https://www\.xccl\d+\.xyz', source):
+            domains.add(m)
 
-    from urllib.parse import unquote
-    unescape_matches = re.findall(r'unescape\("([^"]+)"\)', content)
-    for encoded in unescape_matches:
+    # 域名列表在解码后的载荷里，源文件中 https:// 出现 0 次，明文匹配必然为空
+    packed_literals = (re.findall(r'"([^"\n]{200,})"', content)
+                       + re.findall(r"'([^'\n]{200,})'", content))
+    decoded_any = False
+    for encoded in packed_literals:
+        if encoded.count('%') < 20:
+            continue
         try:
-            decoded = unquote(encoded)
-            for m in re.findall(r'https://www\.xccl\d+\.xyz', decoded):
-                domains.add(m)
+            decoded = _decode_xccl(encoded)
         except Exception as e:
             print(f'[小草] 解码失败: {e}')
+            continue
+        decoded_any = True
+        for m in re.findall(r'https://www\.xccl\d+\.xyz', decoded):
+            domains.add(m)
 
-    for m in re.findall(r'https://www\.xccl\d+\.xyz', content.replace('\\/', '/')):
-        domains.add(m)
+    if not domains:
+        print(f'[小草] 源文件含 {len(packed_literals)} 个长字符串，载荷解码{"成功但无域名" if decoded_any else "未命中"}')
 
     result = sorted(domains)
     print(f'[小草] 提取到 {len(result)} 个域名')
