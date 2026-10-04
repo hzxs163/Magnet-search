@@ -25,6 +25,7 @@ export async function onRequest(context) {
 
   const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
+  const wantSourceView = url.searchParams.get('perSource') === '1';
 
   if (!query) {
     return jsonResponse({ error: 'Missing query parameter' }, 400);
@@ -114,16 +115,19 @@ export async function onRequest(context) {
     const results = await Promise.allSettled(tasks.map(t => t.promise));
 
     const allItems = [];
+    const bySource = {};
     const debug = {};
 
     results.forEach((r, i) => {
       const name = tasks[i].name;
       if (r.status === 'fulfilled') {
+        bySource[name] = r.value;
         allItems.push(...r.value);
         debug[`${name}Status`] = 'fulfilled';
         debug[`${name}Count`] = r.value.length;
       } else {
         console.error(`${name} failed:`, r.reason);
+        bySource[name] = [];
         debug[`${name}Status`] = 'rejected';
         debug[`${name}Count`] = 0;
         debug[`${name}Error`] = String(r.reason);
@@ -142,8 +146,25 @@ export async function onRequest(context) {
     }
 
     const timing = Date.now() - startTime;
+    // 只有前端全源预取（perSource=1）才带按源视图：单源视图不能走 deduped，聚合类镜像源
+    // （磁力搜/海盗湾/TorrentGalaxy）的条目与排在它前面的源完全重复，按 btih 去重后整批归零，
+    // 前端切到这些源就显示空。只有真被去重削掉条目或整轮失败的源才需要这份，其余源
+    // 去重前后条目一致，走合并列表就是完整视图；直查请求不带这份，避免响应体翻三倍。
+    let sourceView = undefined;
+    if (wantSourceView) {
+      const survivors = {};
+      for (const item of deduped) {
+        survivors[item.source] = (survivors[item.source] || 0) + 1;
+      }
+      sourceView = {};
+      for (const name of Object.keys(bySource)) {
+        if (bySource[name].length > (survivors[name] || 0)) sourceView[name] = bySource[name];
+      }
+    }
+
     return jsonResponse({
       results: deduped,
+      bySource: sourceView,
       total: deduped.length,
       timing,
       sourceSites: buildSourceSites(),

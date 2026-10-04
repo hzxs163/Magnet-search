@@ -830,6 +830,16 @@
       return results.filter((it) => set.has(it.source));
     }
 
+    // 只看一个源时用后端 bySource（未跨源去重）：deduped 里聚合类镜像源的条目会被整批删掉
+    // 多选仍用去重后的合并列表，避免聚合视图出现重复行
+    function cachedResultsFor(cached, sources) {
+      const bySource = cached.data.bySource;
+      if (sources.length === 1 && bySource && Array.isArray(bySource[sources[0]])) {
+        return bySource[sources[0]];
+      }
+      return filterBySources(cached.data.results, sources);
+    }
+
     // 真实请求的结果合并回缓存：替换缓存中"勾选源"的旧条目（修复全源去重导致的源缺失）
     function mergeIntoCache(query, data, sources) {
       const ck = cacheKeyFor(query, currentSort);
@@ -840,30 +850,60 @@
       // 聚合站结果 magnet 可能与其它站相同，去重会误删该源完整结果）
       const others = prev.data.results.filter((it) => !srcSet.has(it.source));
       const merged = [...others, ...(data.results || [])];
-      resultCache.set(ck, { data: { ...prev.data, results: merged, total: merged.length }, ts: Date.now() });
+      const nextBySource = { ...(prev.data.bySource || {}) };
+      for (const s of sources) {
+        if (data.bySource && Array.isArray(data.bySource[s])) {
+          nextBySource[s] = data.bySource[s];
+        } else if (sources.length === 1) {
+          // 单源直查没有跨源去重，返回的就是该源完整视图
+          nextBySource[s] = data.results || [];
+        }
+        // 多源直查且后端没带按源视图：不覆盖已有视图也不伪造，交给 needRealRefresh 按 Count 补抓
+      }
+      resultCache.set(ck, { data: { ...prev.data, results: merged, bySource: nextBySource, total: merged.length }, ts: Date.now() });
     }
 
     let realRefreshing = false;          // 真实修正防重入
+    let pendingRefreshQuery = null;      // 被 isLoading 挡掉的修正，等当前搜索结束后补做
+
+    // 是否值得为当前勾选源补一次真实请求
+    function needRealRefresh(cached, sources) {
+      const dbg = cached.data.debug || {};
+      const bySource = cached.data.bySource;
+      const filtered = cachedResultsFor(cached, sources);
+      const heldCount = (src) => {
+        const arr = bySource && bySource[src];
+        return Array.isArray(arr) ? arr.length : filtered.filter((it) => it.source === src).length;
+      };
+      return sources.some((src) => {
+        // 全源预取里该源整轮失败（如撞 CF 单 invocation 子请求上限），Count 记 0
+        // 只代表"这一轮没抓到"，不代表源没有结果；已补到条目就不再重复打
+        if (dbg[`${src}Status`] === 'rejected') return heldCount(src) === 0;
+        // 该源已有完整的未去重视图，无需事后补齐（多选视图走聚合去重是预期行为）
+        if (Array.isArray(bySource && bySource[src])) return false;
+        const cnt = Number(dbg[`${src}Count`]) || 0;
+        if (cnt <= 0) return false;
+        return heldCount(src) < cnt;
+      });
+    }
+
     // 秒出后修正：勾选源里"预取时有结果但缓存缺失/不全"（如全源去重把聚合站结果丢掉）→ 后台真实请求补齐
     async function refreshFromRealIfNeeded(query) {
-      if (isLoading || realRefreshing) return;
+      if (realRefreshing) return;
+      if (isLoading) {
+        pendingRefreshQuery = query;
+        return;
+      }
       const ck = cacheKeyFor(query, currentSort);
       const cached = resultCache.get(ck);
       if (!cached) return;
       const sources = getSelectedSources();
       if (sources.length === 0) return;
-      const dbg = cached.data.debug || {};
-      const filtered = filterBySources(cached.data.results, sources);
-      const needReal = sources.some((src) => {
-        const cnt = Number(dbg[`${src}Count`]) || 0;
-        if (cnt <= 0) return false;
-        return filtered.filter((it) => it.source === src).length < cnt;
-      });
-      if (!needReal) return;
+      if (!needRealRefresh(cached, sources)) return;
       realRefreshing = true;
       const srcsSnapshot = sources.join(',');
       try {
-        const url = `${API_BASE}/api/search?q=${encodeURIComponent(query)}&page=1&sort=${currentSort}&sources=${encodeURIComponent(sources.join(','))}`;
+        const url = `${API_BASE}/api/search?q=${encodeURIComponent(query)}&page=1&sort=${currentSort}&perSource=1&sources=${encodeURIComponent(srcsSnapshot)}`;
         const res = await fetch(url);
         if (!res.ok) return;
         const data = await res.json();
@@ -887,7 +927,7 @@
       prefetchingKey = ck;
       try {
         const allSources = SOURCES.map((s) => s.id);
-        const url = `${API_BASE}/api/search?q=${encodeURIComponent(query)}&page=1&sort=${currentSort}&sources=${encodeURIComponent(allSources.join(','))}`;
+        const url = `${API_BASE}/api/search?q=${encodeURIComponent(query)}&page=1&sort=${currentSort}&perSource=1&sources=${encodeURIComponent(allSources.join(','))}`;
         const res = await fetch(url);
         if (!res.ok) return;
         const data = await res.json();
@@ -912,7 +952,7 @@
       currentPage = 1;
       header.classList.add('compact');
       hotSearches.style.display = 'none';
-      const filtered = filterBySources(cached.data.results, sources);
+      const filtered = cachedResultsFor(cached, sources);
       renderResults({ ...cached.data, results: filtered, total: filtered.length }, query, 1);
       refreshFromRealIfNeeded(query);     // 后台修正：预取有结果但缓存缺失的源（如聚合站被去重）
       return true;
@@ -1227,6 +1267,11 @@
           const p = pendingSearch;
           pendingSearch = null;
           doSearch(p.query, p.page);
+        } else if (pendingRefreshQuery) {
+          // 切源时被 isLoading 挡掉的补齐不能丢，否则该源一直空白
+          const rq = pendingRefreshQuery;
+          pendingRefreshQuery = null;
+          refreshFromRealIfNeeded(rq);
         }
       }
     }
