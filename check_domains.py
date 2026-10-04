@@ -120,6 +120,56 @@ def fetch_text(url, timeout=15, headers=None):
     return text
 
 
+def fetch_probe(url, timeout=15, headers=None, impersonate='chrome120'):
+    """与 fetch_url 相同，但额外返回状态码，且非 2xx 不抛异常。
+
+    fetch_url 丢掉了状态码，导致「被 CF/WAF 拦」和「站点已经死了」在日志里长得一样
+    （两者都只是 json.loads 的一句 Expecting value），这里保留证据。
+    """
+    h = {**HEADERS, **(headers or {})}
+
+    if HAS_CFFI:
+        resp = cffi_requests.get(
+            url,
+            headers=h,
+            timeout=timeout,
+            impersonate=impersonate,
+            allow_redirects=True,
+            verify=False,
+        )
+        return resp.text, resp.status_code, str(resp.url)
+
+    req = urllib.request.Request(url, headers=h)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            return resp.read().decode('utf-8', errors='replace'), resp.status, resp.geturl()
+    except urllib.error.HTTPError as e:
+        return e.read().decode('utf-8', errors='replace'), e.code, url
+
+
+def brief_body(text, limit=120):
+    flat = re.sub(r'\s+', ' ', (text or '').strip())
+    return flat[:limit]
+
+
+def probe_json_endpoint(tag, url, timeout=12):
+    """探测固定 API 并解析 JSON；失败时把状态码和正文开头打进日志。返回 None 表示本次无结论。"""
+    try:
+        text, status, final_url = fetch_probe(url, timeout=timeout)
+    except Exception as e:
+        print(f'[{tag}] 探测异常: {type(e).__name__}: {e}')
+        return None
+
+    try:
+        return json.loads(text)
+    except Exception:
+        print(f'[{tag}] 响应不是 JSON: http={status} url={final_url} body[:120]={brief_body(text)!r}')
+        return None
+
+
 # ========== 小草磁力 ==========
 _XCCL_HEX2 = re.compile(r'[0-9a-fA-F]{2}')
 _XCCL_HEX4 = re.compile(r'[0-9a-fA-F]{4}')
@@ -386,15 +436,36 @@ def extract_hufeng_domains():
 
 
 # ========== 雨花阁（走 Pages 代理） ==========
+def _fetch_yuhuage_proxy(attempts=3, delay=4):
+    """源站 iyuhuage.fun 对 Cloudflare 出口是概率性 403，单发一次会让整轮漏检，所以退避重试。"""
+    for i in range(1, attempts + 1):
+        try:
+            text, http_status, _ = fetch_probe(YUHUAGE_PROXY_URL, timeout=20)
+            data = json.loads(text)
+        except Exception as e:
+            print(f'[雨花阁] 第 {i}/{attempts} 次代理请求失败: {type(e).__name__}: {e}')
+            data = None
+        else:
+            origin_status = data.get('status')
+            print(f'[雨花阁] 第 {i}/{attempts} 次代理 http={http_status} 源站 status={origin_status} '
+                  f'location={data.get("location")}')
+            if data.get('location') or origin_status in (200, 301, 302, 303, 307, 308):
+                return data
+        if i < attempts:
+            time.sleep(delay)
+    return None
+
+
 def extract_yuhuage_domains():
     domains = set()
 
     print(f'[雨花阁] 通过代理请求: {YUHUAGE_PROXY_URL}')
-    try:
-        text, _ = fetch_url(YUHUAGE_PROXY_URL, timeout=20)
-        data = json.loads(text)
-        print(f'[雨花阁] 代理返回 status={data.get("status")} location={data.get("location")}')
+    data = _fetch_yuhuage_proxy()
+    if data is None:
+        print('[雨花阁] 重试后仍未取得可用响应，保留上次结果')
+        return []
 
+    try:
         loc = data.get('location')
         if loc:
             m = re.match(r'(https?://[^/]+)', loc)
@@ -427,7 +498,7 @@ def extract_yuhuage_domains():
                 domains.add(url)
 
     except Exception as e:
-        print(f'[雨花阁] 代理请求失败: {e}')
+        print(f'[雨花阁] 解析代理响应失败: {e}')
 
     result = sorted(domains)
     print(f'[雨花阁] 提取到 {len(result)} 个落地域名')
@@ -580,16 +651,15 @@ def extract_taocili_domains():
 # ========== TPB（apibay 官方 API） ==========
 def extract_tpb_domains():
     """TPB：apibay.org 官方 API 探测（返回含 info_hash 的真实记录即可用）。"""
-    try:
-        text = fetch_text('https://apibay.org/q.php?q=avengers&cat=0', timeout=12)
-        arr = json.loads(text)
-        if isinstance(arr, list) and any(
-            isinstance(x, dict) and x.get('id') != '0' and x.get('info_hash') for x in arr
-        ):
-            print('[TPB] apibay.org 可用')
-            return ['https://apibay.org']
-    except Exception as e:
-        print(f'[TPB] 探测失败: {e}')
+    arr = probe_json_endpoint('TPB', 'https://apibay.org/q.php?q=avengers&cat=0')
+    if arr is None:
+        return []
+    if isinstance(arr, list) and any(
+        isinstance(x, dict) and x.get('id') != '0' and x.get('info_hash') for x in arr
+    ):
+        print('[TPB] apibay.org 可用')
+        return ['https://apibay.org']
+    print('[TPB] 响应可解析但无有效记录')
     return []
 
 
@@ -621,14 +691,13 @@ def extract_piratebay_domains():
 # ========== therarbg（RARBG 延续，JSON API） ==========
 def extract_therarbg_domains():
     """therarbg：JSON API 探测（keywords 多词必须 %20 编码，用 + 会返回 0 条）。"""
-    try:
-        text = fetch_text('https://therarbg.com/get-posts/keywords:avengers/?format=json', timeout=12)
-        j = json.loads(text)
-        if isinstance(j, dict) and isinstance(j.get('results'), list) and len(j['results']) > 0:
-            print('[therarbg] therarbg.com 可用')
-            return ['https://therarbg.com']
-    except Exception as e:
-        print(f'[therarbg] 探测失败: {e}')
+    j = probe_json_endpoint('therarbg', 'https://therarbg.com/get-posts/keywords:avengers/?format=json')
+    if j is None:
+        return []
+    if isinstance(j, dict) and isinstance(j.get('results'), list) and len(j['results']) > 0:
+        print('[therarbg] therarbg.com 可用')
+        return ['https://therarbg.com']
+    print('[therarbg] 响应可解析但无结果')
     return []
 
 
