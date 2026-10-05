@@ -13,6 +13,8 @@ const JUNIORTER_PROVIDERS = [
 
 const KNABEN_API = 'https://api.knaben.org/v1';
 
+const BTSOW_SITE = 'https://btsow.live';
+
 let CCTV10_DEBUG = {};
 let CILIMAO_DEBUG = {};
 
@@ -23,7 +25,7 @@ export async function onRequest(context) {
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
 
-  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood';
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood,btsow';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
   const wantSourceView = url.searchParams.get('perSource') === '1';
 
@@ -111,6 +113,9 @@ export async function onRequest(context) {
     if (sources.includes('tpbweb')) {
       tasks.push({ name: 'tpbweb', promise: fetchFromTpbWeb(query, page, sort, waitUntil) });
     }
+    if (sources.includes('btsow')) {
+      tasks.push({ name: 'btsow', promise: fetchFromBtsow(query, page, waitUntil) });
+    }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
 
@@ -196,6 +201,7 @@ function buildSourceSites() {
   sites['0magnet'] = 'https://0magnet.com';
   sites['juniorter'] = 'https://torrent.juniorter.in';
   sites['knaben'] = 'https://knaben.org';
+  sites['btsow'] = BTSOW_SITE;
   return sites;
 }
 
@@ -313,6 +319,62 @@ function parseKnabenResults(data) {
       magnet: magnet,
       detailUrl: hit.details || '',
       source: 'knaben',
+    });
+  }
+  return items;
+}
+
+// ========== BTSOW ==========
+// 接口是位置参数数组：POST /bts/data/api/search  body [{search:关键词}, 每页条数, 页码(从 1 起)]
+// 返回 {code, data:[{hash, name, size(字节), lastUpdateTime(unix 秒)}]}，无做种/下载数。
+// 只有"最新转换"一种排序（lastUpdateTime 倒序），所以不接 sort 参数，缓存键也不带 sort。
+async function fetchFromBtsow(query, page, waitUntil) {
+  const p = Math.max(1, page || 1);
+  const cacheKey = new Request(`https://btsow-cache.local/?q=${encodeURIComponent(query)}&page=${p}`, { method: 'GET' });
+  const cache = caches.default;
+
+  let response = await cache.match(cacheKey);
+  if (!response) {
+    response = await fetch(`${BTSOW_SITE}/bts/data/api/search`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Origin': BTSOW_SITE,
+        'Referer': `${BTSOW_SITE}/`,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+      body: JSON.stringify([{ search: query }, 50, p]),
+    });
+
+    if (!response.ok) throw new Error(`BTSOW HTTP ${response.status}`);
+
+    const text = await response.clone().text();
+    const cacheResponse = new Response(text, {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'public, max-age=1800' },
+    });
+    if (waitUntil) waitUntil(cache.put(cacheKey, cacheResponse));
+    else await cache.put(cacheKey, cacheResponse);
+  }
+
+  return parseBtsowResults(await response.json());
+}
+
+function parseBtsowResults(data) {
+  const items = [];
+  for (const r of (data && Array.isArray(data.data) ? data.data : [])) {
+    if (!r || !r.hash) continue;
+    const name = String(r.name || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    if (!name) continue;
+    items.push({
+      name: name,
+      size: formatBytes(Number(r.size) || 0),
+      date: isoFromUnix(r.lastUpdateTime),
+      seeds: 0,
+      peers: 0,
+      magnet: `magnet:?xt=urn:btih:${String(r.hash).toLowerCase()}`,
+      detailUrl: `${BTSOW_SITE}/magnet/detail/${r.hash}`,
+      source: 'btsow',
     });
   }
   return items;
