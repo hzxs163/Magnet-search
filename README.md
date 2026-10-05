@@ -27,7 +27,7 @@
 
 ## 域名自动更新
 
-仓库自带 `.github/workflows/check-domains.yml`，每天定时跑 `check_domains.py`：
+仓库自带 `.github/workflows/check-domains.yml`，每 30 分钟定时跑 `check_domains.py`：
 
 - 自动从各源发布页抓取最新可用域名
 - 写入 `domains.json` 并自动 commit 回仓库
