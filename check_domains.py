@@ -9,6 +9,7 @@
 6. 磁力猫（cilimao）：从永久入口 clm.cc / clm.la / cilimao.biz 解码 JS 跳转拿落地域名
 7. 磁力搜（ciliso）：CONFIG 写死，用磁力百科同款算法生成子域名
 8. 淘磁力（taocili）：从发布页 wangzhi.icu/config.js 的「淘磁力」块提取域名，探测可用性
+9. BTSOW（btsow）：从官方发布页 tellme.pw/btsow 提取站点域，POST 私有接口实探测
 把生成的域名写入 domains.json，验证交给 Workers 运行时做
 
 依赖：curl_cffi（用于模拟 Chrome TLS 指纹，绕过 WAF 403）
@@ -722,6 +723,86 @@ def extract_eztv_domains():
     return ok
 
 
+# ========== BTSOW（官方发布页发现站点域 + POST 私有接口实探测） ==========
+# 发布页正文只列当前站点域，它历史上换过 btsow.ru/.pw/.org，写死一条迟早撞墙。
+# btsow.com 也常被当成站点域：它其实只对发布页做 302，POST 接口会退化成 HTML，
+# 所以不靠名单剔，一律走接口探测过滤（btsow_api_probe 不允许跟随跳转）。
+BTSOW_PUBLISH_URLS = [
+    'https://tellme.pw/btsow',  # 官方发布页
+    'https://btsow.com',        # 备用入口，302 到 tellme.pw/bts（同一页）
+]
+
+
+def btsow_api_probe(dom, timeout=12):
+    """对候选域打一次真实搜索请求，返回 (状态码, 正文)。"""
+    payload = json.dumps([{'search': 'avatar'}, 1, 1]).encode('utf-8')
+    h = {
+        **HEADERS,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Origin': dom,
+        'Referer': dom + '/',
+    }
+    url = dom + '/bts/data/api/search'
+    if HAS_CFFI:
+        resp = cffi_requests.post(url, headers=h, data=payload, timeout=timeout,
+                                  impersonate='chrome120', allow_redirects=False, verify=False)
+        return resp.status_code, resp.text
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(url, data=payload, headers=h, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            return resp.status, resp.read().decode('utf-8', errors='replace')
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode('utf-8', errors='replace')
+
+
+def extract_btsow_domains():
+    """从发布页提取候选域，逐个 POST 接口探测，可用域名按出现顺序保留。"""
+    html = ''
+    for pub in BTSOW_PUBLISH_URLS:
+        try:
+            text = fetch_text(pub, timeout=15)
+            if text and 'http' in text:
+                html = text
+                print(f'[BTSOW] 发布页 {pub} 取得 {len(html)} 字节')
+                break
+        except Exception as e:
+            print(f'[BTSOW] 发布页 {pub} 失败: {e}')
+    if not html:
+        return []
+
+    candidates = []
+    for m in re.finditer(r'https?://[\w-]+(?:\.[\w-]+)*\.[a-zA-Z]{2,}', html):
+        dom = m.group(0).rstrip('/')
+        if 'tellme.pw' in dom:  # 发布页自己不是站点域
+            continue
+        if is_valid_domain_url(dom) and dom not in candidates:
+            candidates.append(dom)
+    print(f'[BTSOW] 候选域: {candidates}')
+
+    ok = []
+    for dom in candidates:
+        try:
+            status, text = btsow_api_probe(dom)
+        except Exception as e:
+            print(f'[BTSOW] {dom} 探测失败: {type(e).__name__}: {e}')
+            continue
+        try:
+            data = json.loads(text).get('data')
+        except Exception:
+            data = None
+        if status == 200 and isinstance(data, list):
+            print(f'[BTSOW] {dom} 可用（探测返回 {len(data)} 条）')
+            ok.append(dom)
+        else:
+            print(f'[BTSOW] {dom} 不可用: status={status} body[:120]={brief_body(text)!r}')
+    return ok
+
+
 def load_previous_domains():
     if not OUTPUT_FILE.exists():
         return {}
@@ -761,6 +842,7 @@ def main():
         'tpbweb': [],
         'torrentgalaxy': [],
         'filemood': [],
+        'btsow': [],
     }
 
     result['xiaocao'] = extract_xiaocao_domains()
@@ -1021,7 +1103,8 @@ def main():
                      ('xcisou', extract_xcisou_domains),
                      ('tpbweb', extract_tpbweb_domains),
                      ('torrentgalaxy', extract_torrentgalaxy_domains),
-                     ('filemood', extract_filemood_domains)]:
+                     ('filemood', extract_filemood_domains),
+                     ('btsow', extract_btsow_domains)]:
         found = fn()
         if found:
             result[name] = found
@@ -1056,6 +1139,7 @@ def main():
     print(f'  海盗湾: {len(result["tpbweb"])} 个')
     print(f'  TorrentGalaxy: {len(result["torrentgalaxy"])} 个')
     print(f'  FileMood: {len(result["filemood"])} 个')
+    print(f'  BTSOW: {len(result["btsow"])} 个')
     if result['cctv10']:
         print('  U3C3 域名:')
         for d in result['cctv10']:
@@ -1115,6 +1199,11 @@ def main():
     if result['tpbweb']:
         print('  海盗湾域名:')
         for d in result['tpbweb']:
+            print(f'    - {d}')
+
+    if result['btsow']:
+        print('  BTSOW域名:')
+        for d in result['btsow']:
             print(f'    - {d}')
 
 

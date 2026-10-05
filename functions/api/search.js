@@ -13,6 +13,7 @@ const JUNIORTER_PROVIDERS = [
 
 const KNABEN_API = 'https://api.knaben.org/v1';
 
+// BTSOW 站点域以 domains.json 的 btsow 为准（check_domains.py 从官方发布页发现），这里只作保底
 const BTSOW_SITE = 'https://btsow.live';
 
 let CCTV10_DEBUG = {};
@@ -201,7 +202,7 @@ function buildSourceSites() {
   sites['0magnet'] = 'https://0magnet.com';
   sites['juniorter'] = 'https://torrent.juniorter.in';
   sites['knaben'] = 'https://knaben.org';
-  sites['btsow'] = BTSOW_SITE;
+  if (!sites['btsow']) sites['btsow'] = BTSOW_SITE;  // 域名池为空时的保底
   return sites;
 }
 
@@ -245,6 +246,7 @@ function getDomainsConfig() {
     btfox: Array.isArray(data.btfox) ? data.btfox : [],
     zhongziba: Array.isArray(data.zhongziba) ? data.zhongziba : [],
     cilichi: Array.isArray(data.cilichi) ? data.cilichi : [],
+    btsow: Array.isArray(data.btsow) ? data.btsow : [],
   };
 }
 
@@ -325,46 +327,89 @@ function parseKnabenResults(data) {
 }
 
 // ========== BTSOW ==========
-// 接口是位置参数数组：POST /bts/data/api/search  body [{search:关键词}, 每页条数, 页码(从 1 起)]
+// 接口是位置参数数组：POST {站点域}/bts/data/api/search  body [{search:关键词}, 每页条数, 页码(从 1 起)]
 // 返回 {code, data:[{hash, name, size(字节), lastUpdateTime(unix 秒)}]}，无做种/下载数。
-// 只有"最新转换"一种排序（lastUpdateTime 倒序），所以不接 sort 参数，缓存键也不带 sort。
+// 只有“最新转换”一种排序（lastUpdateTime 倒序），所以不接 sort，缓存键也不带 sort。
+// 站点域不写死：check_domains.py 定时从官方发布页 tellme.pw/btsow 抓当前域、探测后写进
+// domains.json 的 btsow，这里按域名池依次试，命中那个域就用它拼 detailUrl。
+// 域名池全不通（换域没赶上、出口被封）再退回一起搜官方的 btsow 中转：明文 HTTP 的裸 IP，
+// 同一份索引、同一顺序，但固定 30 条/页且整体慢一页（中转 pageN = 直连 page(N+1) 的前 30 条），
+// 所以按 p-1 取，连续翻页不重叠，只是每页少 20 条。
+// 两条通路共用 10s 预算（直连 7s、中转至少 3s），别把整轮搜索拖长。
+const BTSOW_YQS_PROXY = 'http://38.207.184.131/yqs/btsow.php';
+
+// 站方在标题里塞了 <em> 高亮和零宽空格（1080\u200bp 这种），\s 不含零宽字符，得单独去
+function cleanBtsowName(s) {
+  return String(s || '').replace(/<[^>]+>/g, '').replace(/[\u200b-\u200f\u2060\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+}
+
 async function fetchFromBtsow(query, page, waitUntil) {
   const p = Math.max(1, page || 1);
   const cacheKey = new Request(`https://btsow-cache.local/?q=${encodeURIComponent(query)}&page=${p}`, { method: 'GET' });
   const cache = caches.default;
 
-  let response = await cache.match(cacheKey);
-  if (!response) {
-    response = await fetch(`${BTSOW_SITE}/bts/data/api/search`, {
-      method: 'POST',
+  const hit = await cache.match(cacheKey);
+  if (hit) return (await hit.json()).items || [];
+
+  const cfg = getDomainsConfig().btsow;
+  const domains = (cfg && cfg.length) ? cfg : [BTSOW_SITE];
+  const start = Date.now();
+  let items = null;
+
+  for (const dom of domains) {
+    const left = start + 7000 - Date.now();
+    if (left < 800) break;  // 直连预算用完，剩下的时间留给中转
+    try {
+      const r = await fetch(`${dom}/bts/data/api/search`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+          'Origin': dom,
+          'Referer': `${dom}/`,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+        body: JSON.stringify([{ search: query }, 50, p]),
+        signal: AbortSignal.timeout(Math.min(6000, left)),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      items = parseBtsowResults(await r.json(), dom);
+      break;
+    } catch (e) {
+      console.error(`BTSOW domain ${dom} failed:`, e.message);
+    }
+  }
+
+  if (items === null) {
+    const left = Math.max(1000, Math.min(8000, start + 10000 - Date.now()));
+    const r = await fetch(`${BTSOW_YQS_PROXY}?keyword=${encodeURIComponent(query)}&page=${p - 1}`, {
       headers: {
-        'Content-Type': 'application/json',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Origin': BTSOW_SITE,
-        'Referer': `${BTSOW_SITE}/`,
+        'Accept': 'application/json',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       },
-      body: JSON.stringify([{ search: query }, 50, p]),
+      signal: AbortSignal.timeout(left),
     });
+    if (!r.ok) throw new Error(`BTSOW 中转 HTTP ${r.status}`);
+    items = parseBtsowProxyResults(await r.json());
+  }
 
-    if (!response.ok) throw new Error(`BTSOW HTTP ${response.status}`);
-
-    const text = await response.clone().text();
-    const cacheResponse = new Response(text, {
+  if (items.length) {
+    // 缓存归一化后的条目：两条通路响应形状不同，存原始响应就没法共用一个缓存键
+    const cacheResponse = new Response(JSON.stringify({ items }), {
       headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'public, max-age=1800' },
     });
     if (waitUntil) waitUntil(cache.put(cacheKey, cacheResponse));
     else await cache.put(cacheKey, cacheResponse);
   }
-
-  return parseBtsowResults(await response.json());
+  return items;
 }
 
-function parseBtsowResults(data) {
+function parseBtsowResults(data, site) {
   const items = [];
   for (const r of (data && Array.isArray(data.data) ? data.data : [])) {
     if (!r || !r.hash) continue;
-    const name = String(r.name || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    const name = cleanBtsowName(r.name);
     if (!name) continue;
     items.push({
       name: name,
@@ -373,7 +418,31 @@ function parseBtsowResults(data) {
       seeds: 0,
       peers: 0,
       magnet: `magnet:?xt=urn:btih:${String(r.hash).toLowerCase()}`,
-      detailUrl: `${BTSOW_SITE}/magnet/detail/${r.hash}`,
+      detailUrl: `${site}/magnet/detail/${r.hash}`,
+      source: 'btsow',
+    });
+  }
+  return items;
+}
+
+// 中转响应：{result:[{title, magnet(大写 hash), size(已格式化字符串), seeder(实为转换日期)}]}
+function parseBtsowProxyResults(data) {
+  const items = [];
+  for (const r of (data && Array.isArray(data.result) ? data.result : [])) {
+    if (!r || !r.magnet) continue;
+    const hash = (String(r.magnet).match(/btih:([a-zA-Z0-9]{32,40})/) || [])[1];
+    if (!hash) continue;
+    const name = cleanBtsowName(r.title);
+    if (!name) continue;
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(r.seeder || '')) ? String(r.seeder) : '';
+    items.push({
+      name: name,
+      size: String(r.size || '').trim(),
+      date: date,
+      seeds: 0,
+      peers: 0,
+      magnet: `magnet:?xt=urn:btih:${hash.toLowerCase()}`,
+      detailUrl: `${getDomainsConfig().btsow[0] || BTSOW_SITE}/magnet/detail/${hash.toUpperCase()}`,
       source: 'btsow',
     });
   }
