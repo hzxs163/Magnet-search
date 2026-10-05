@@ -4,7 +4,7 @@
 
 ## 功能
 
-- 🔍 **多源聚合**：25 个搜索源（Knaben、TPB API、BTSOW、海盗湾HTML、海盗湾、RARBG、TorrentGalaxy、FileMood、EZTV、YTS、喵磁力、x磁搜、BtFox、种子吧等）
+- 🔍 **多源聚合**：多个搜索源（Knaben、TPB API、海盗湾、RARBG、TorrentGalaxy、FileMood、EZTV等）
 - ⚡ **切源秒出**：多源并发，单个源失败/超时不影响整体
 - 🎨 **书院黄主题**：米白纸色 + 暖棕配色，深色/浅色自适应
 - 📥 **一键下载**：磁力链接直接调系统默认下载软件
