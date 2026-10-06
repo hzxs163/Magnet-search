@@ -2,8 +2,8 @@
 // 返回各搜索源的连通性：{ sources: { id: 'up'|'down'|'unknown' }, checkedAt, timing }
 // 探测逻辑在 functions/source-probe.js，结果在 Worker 内缓存 5 分钟，?refresh=1 强制重探。
 
-import domainsConfig from '../domains.json';
-import { probeSources } from './source-probe.js';
+import domainsConfig from '../../domains.json';
+import { probeSources } from '../source-probe.js';
 
 export async function onRequest(context) {
   const url = new URL(context.request.url);
