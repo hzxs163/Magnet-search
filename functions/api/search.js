@@ -16,6 +16,9 @@ const KNABEN_API = 'https://api.knaben.org/v1';
 // BTSOW 站点域以 domains.json 的 btsow 为准（check_domains.py 从官方发布页发现），这里只作保底
 const BTSOW_SITE = 'https://btsow.live';
 
+// 磁力宝站点域以 domains.json 的 cilibao 为准（check_domains.py 从发布页 clb.im 等发现），这里只作保底
+const CILIBAO_SITE = 'https://clb21.vip';
+
 let CCTV10_DEBUG = {};
 let CILIMAO_DEBUG = {};
 
@@ -26,7 +29,7 @@ export async function onRequest(context) {
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
 
-  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood,btsow';
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood,btsow,cilibao';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
   const wantSourceView = url.searchParams.get('perSource') === '1';
 
@@ -117,6 +120,9 @@ export async function onRequest(context) {
     if (sources.includes('btsow')) {
       tasks.push({ name: 'btsow', promise: fetchFromBtsow(query, page, waitUntil) });
     }
+    if (sources.includes('cilibao')) {
+      tasks.push({ name: 'cilibao', promise: fetchFromCilibao(query, page, sort, waitUntil) });
+    }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
 
@@ -203,6 +209,7 @@ function buildSourceSites() {
   sites['juniorter'] = 'https://torrent.juniorter.in';
   sites['knaben'] = 'https://knaben.org';
   if (!sites['btsow']) sites['btsow'] = BTSOW_SITE;  // 域名池为空时的保底
+  if (!sites['cilibao']) sites['cilibao'] = CILIBAO_SITE;
   return sites;
 }
 
@@ -247,6 +254,7 @@ function getDomainsConfig() {
     zhongziba: Array.isArray(data.zhongziba) ? data.zhongziba : [],
     cilichi: Array.isArray(data.cilichi) ? data.cilichi : [],
     btsow: Array.isArray(data.btsow) ? data.btsow : [],
+    cilibao: Array.isArray(data.cilibao) ? data.cilibao : [],
   };
 }
 
@@ -1325,6 +1333,139 @@ async function batchFetchCilichiMagnets(items, waitUntil) {
           results.push({ name: item.name, size: item.size, date: item.date, magnet: simplifyMagnet(magnetUrl), detailUrl: item.detailUrl, source: 'cilichi' });
         }
       } catch (e) {}
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker));
+  return results;
+}
+
+// ========== 磁力宝 ==========
+// 搜索页 /s/{base64(关键词)}（带不带 padding 都认），排序参数 rel/time/hits/size，翻页 ?page=N，每页 10 条。
+// 列表只有 /detail/{短码}，磁力链接在详情页 <textarea> 里，需要二次抓取。
+// 站点有“点击验证”反爬墙：任何路径的首个请求返回验证页（200）并下发 PHPSESSID，
+// 带该 cookie 向同域任意路径 POST act=challenge 解锁后，再 GET 才是真内容。
+// Workers 无状态，会话按 host->cookie 存模块级 Map，同一 isolate 内复用，避免每次请求都付挑战成本。
+const cilibaoSessions = new Map();
+
+function cilibaoIsChallenge(html) {
+  return html.includes('验证页面') || html.includes('cf-im-under-attack');
+}
+
+function cilibaoHeaders(cookie) {
+  return {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'zh-CN,zh;q=0.9',
+    ...(cookie ? { 'Cookie': cookie } : {}),
+  };
+}
+
+async function fetchCilibaoHtml(url, ttl, waitUntil) {
+  const cacheKey = new Request(url, { method: 'GET' });
+  const hit = await caches.default.match(cacheKey);
+  if (hit) return hit.text();
+
+  const host = new URL(url).host;
+  let cookie = cilibaoSessions.get(host) || null;
+  let resp = await fetch(url, { headers: cilibaoHeaders(cookie) });
+  let text = await resp.text();
+
+  if (cilibaoIsChallenge(text)) {
+    const sid = ((resp.headers.get('set-cookie') || '').match(/PHPSESSID=[^;]+/) || [])[0];
+    if (sid) {
+      try {
+        await fetch(`https://${host}/`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Origin': `https://${host}`,
+            'Referer': `https://${host}/`,
+            'Cookie': sid,
+            'User-Agent': cilibaoHeaders(null)['User-Agent'],
+          },
+          body: 'act=challenge',
+        });
+      } catch (e) { /* 解锁失败下面按验证页处理 */ }
+      resp = await fetch(url, { headers: cilibaoHeaders(sid) });
+      text = await resp.text();
+      if (!cilibaoIsChallenge(text)) cilibaoSessions.set(host, sid);
+    }
+  }
+
+  // 验证页绝不入缓存：一旦固化，整个 TTL 内该源都只会拿到空结果
+  if (resp.ok && !cilibaoIsChallenge(text)) {
+    const cacheResponse = new Response(text, {
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': `public, max-age=${ttl}`,
+      },
+    });
+    if (waitUntil) waitUntil(caches.default.put(cacheKey, cacheResponse));
+    else await caches.default.put(cacheKey, cacheResponse);
+  }
+  return text;
+}
+
+async function fetchFromCilibao(query, page, sort, waitUntil) {
+  const cfg = getDomainsConfig().cilibao;
+  const domains = (cfg && cfg.length) ? cfg : [CILIBAO_SITE];
+  const wd = encodeURIComponent(b64FromUtf8(query));
+  let sortParam = 'rel';
+  if (sort === 'time' || sort === 'newest') sortParam = 'time';
+  else if (sort === 'requests' || sort === 'hits') sortParam = 'hits';
+  else if (sort === 'length' || sort === 'size') sortParam = 'size';
+  const pageNum = Math.max(1, page || 1);
+  for (const domain of domains) {
+    try {
+      const listUrl = `${domain}/s/${wd}?sort=${sortParam}&page=${pageNum}`;
+      const html = await fetchCilibaoHtml(listUrl, 1800, waitUntil);
+      const items = parseCilibaoList(html, domain);
+      if (items.length === 0) continue;
+      return await batchFetchCilibaoMagnets(items, waitUntil);
+    } catch (err) { console.error(`Cilibao domain ${domain} failed:`, err); }
+  }
+  return [];
+}
+
+function parseCilibaoList(html, domain) {
+  const items = [];
+  const blocks = html.split(/<div class="search-item">/);
+  for (let i = 1; i < blocks.length; i++) {
+    const block = blocks[i];
+    const aMatch = block.match(/<h3><a href="(\/detail\/[A-Za-z0-9]+)"[^>]*>([\s\S]*?)<\/a><\/h3>/);
+    if (!aMatch) continue;
+    const name = aMatch[2]
+      .replace(/<[^>]+>/g, '')
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'")
+      .replace(/\s+/g, ' ').trim();
+    if (!name) continue;
+    let size = '', date = '', hot = '';
+    const dateM = block.match(/创建时间[：:]\s*<b[^>]*>([^<]+)<\/b>/);
+    const sizeM = block.match(/文件大小[：:]\s*<b[^>]*>([^<]+)<\/b>/);
+    const hotM = block.match(/下载热度[：:]\s*<b[^>]*>([^<]+)<\/b>/);
+    if (dateM) date = dateM[1].trim();
+    if (sizeM) size = sizeM[1].trim();
+    if (hotM) hot = hotM[1].trim();
+    items.push({ name, size, date, hot, detailUrl: domain + aMatch[1], source: 'cilibao' });
+  }
+  return items;
+}
+
+async function batchFetchCilibaoMagnets(items, waitUntil) {
+  const CONCURRENCY = 5;
+  const results = [];
+  let idx = 0;
+  const worker = async () => {
+    while (idx < items.length) {
+      const i = idx++;
+      const item = items[i];
+      try {
+        const html = await fetchCilibaoHtml(item.detailUrl, 3600, waitUntil);
+        const m = html.match(/<textarea[^>]*>\s*(magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40})/)
+          || html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}/);
+        if (m) results.push({ name: item.name, size: item.size, date: item.date, hot: item.hot, magnet: simplifyMagnet(m[1] || m[0]), detailUrl: item.detailUrl, source: 'cilibao' });
+      } catch (e) { /* 单条详情失败跳过 */ }
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker));

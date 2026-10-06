@@ -10,6 +10,8 @@
 7. 磁力搜（ciliso）：CONFIG 写死，用磁力百科同款算法生成子域名
 8. 淘磁力（taocili）：从发布页 wangzhi.icu/config.js 的「淘磁力」块提取域名，探测可用性
 9. BTSOW（btsow）：从官方发布页 tellme.pw/btsow 提取站点域，POST 私有接口实探测
+10. 磁力宝（cilibao）：从发布页 clb.im / cilibao.app / cilibao.top 解码 JS 跳转拿落地域，
+    搜索页带“点击验证”墙，需先 POST act=challenge 解锁 PHPSESSID 会话再探测
 把生成的域名写入 domains.json，验证交给 Workers 运行时做
 
 依赖：curl_cffi（用于模拟 Chrome TLS 指纹，绕过 WAF 403）
@@ -65,6 +67,17 @@ CILIMAO_ENTRY_URLS = [
     'https://clm.la',
     'https://cilimao.biz',
 ]
+
+# ========== 磁力宝发布页 ==========
+CILIBAO_ENTRY_URLS = [
+    'https://clb.im',
+    'https://cilibao.app',
+    'https://cilibao.top',
+]
+# 保底候选：发布页解码全失败时也拿它探一次（探测不过仍会被上轮结果兜底）
+CILIBAO_FALLBACK_SITE = 'https://clb21.vip'
+# 探测用 base64('jerry')，该关键词在站上必定有结果
+CILIBAO_PROBE_B64 = 'amVycnk='
 
 # ========== 淘磁力发布页（wangzhi.icu/config.js 的「淘磁力」块） ==========
 TAOCILI_SOURCE_URL = 'https://wangzhi.icu/config.js'
@@ -803,6 +816,120 @@ def extract_btsow_domains():
     return ok
 
 
+# ========== 磁力宝（发布页 JS 跳转发现落地域 + 验证墙解锁后实探测） ==========
+# 三个发布页（clb.im / cilibao.app / cilibao.top）都是 document.write(atob(...)) 的 JS 跳转页，
+# 载荷里 location.href 指向当前落地域（形如 clbNN.vip，会轮换）。
+# 落地站对非浏览器流量有“点击验证”墙：任何路径首访返回验证页并下发 PHPSESSID，
+# 带该 cookie POST act=challenge（同域任意路径）解锁会话后，再 GET 才有真内容。
+# fetch_url 不返回响应头，这里自带取 Set-Cookie 的请求函数。
+
+def _cilibao_get(url, cookie=None, timeout=15):
+    h = {**HEADERS}
+    if cookie:
+        h['Cookie'] = cookie
+    if HAS_CFFI:
+        resp = cffi_requests.get(url, headers=h, timeout=timeout,
+                                 impersonate='chrome120', allow_redirects=True, verify=False)
+        sc = resp.headers.get('Set-Cookie', '') or ''
+        m = re.search(r'PHPSESSID=[^;]+', sc)
+        return resp.text, (m.group(0) if m else cookie)
+    req = urllib.request.Request(url, headers=h)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        sc = resp.headers.get('Set-Cookie', '') or ''
+        m = re.search(r'PHPSESSID=[^;]+', sc)
+        return resp.read().decode('utf-8', errors='replace'), (m.group(0) if m else cookie)
+
+
+def _cilibao_post_challenge(dom, cookie, timeout=15):
+    h = {**HEADERS, 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': cookie}
+    if HAS_CFFI:
+        cffi_requests.post(dom + '/', headers=h, data=b'act=challenge', timeout=timeout,
+                           impersonate='chrome120', verify=False)
+        return
+    req = urllib.request.Request(dom + '/', data=b'act=challenge', headers=h, method='POST')
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        resp.read()
+
+
+def cilibao_is_challenge(text):
+    return '验证页面' in text or 'cf-im-under-attack' in text
+
+
+def cilibao_probe(dom, timeout=15):
+    """GET 探测搜索页；遇验证墙则解锁重试，能拿到 search-item 才算可用。"""
+    url = f'{dom}/s/{CILIBAO_PROBE_B64}'
+    text, sid = _cilibao_get(url, timeout=timeout)
+    if not cilibao_is_challenge(text):
+        return 'search-item' in text
+    if not sid:
+        print(f'[磁力宝] {dom} 验证页未下发 PHPSESSID')
+        return False
+    try:
+        _cilibao_post_challenge(dom, sid, timeout=timeout)
+    except Exception as e:
+        print(f'[磁力宝] {dom} 解锁失败: {type(e).__name__}: {e}')
+        return False
+    try:
+        text2, _ = _cilibao_get(url, cookie=sid, timeout=timeout)
+    except Exception as e:
+        print(f'[磁力宝] {dom} 解锁后重试失败: {type(e).__name__}: {e}')
+        return False
+    return 'search-item' in text2
+
+
+def extract_cilibao_domains():
+    from urllib.parse import unquote
+
+    domains = []
+    for entry in CILIBAO_ENTRY_URLS:
+        print(f'[磁力宝] 请求发布页: {entry}')
+        try:
+            html, _ = fetch_url(entry, timeout=20)
+        except Exception as e:
+            print(f'[磁力宝] 发布页 {entry} 失败: {e}')
+            continue
+        # 与磁力猫入口同款：document.write(decodeURIComponent(window.atob("...")))，载荷里 location.href 是落地域
+        for m in re.findall(r'atob\(\s*["\']([^"\']+)["\']\s*\)', html):
+            try:
+                decoded = unquote(base64.b64decode(m).decode('utf-8', errors='replace'))
+            except Exception:
+                continue
+            for lm in re.findall(r"location\.(?:href|replace)\s*[=(]\s*['\"]([^'\"]+)", decoded):
+                mm = re.match(r'(https?://[^/]+)', lm)
+                if not mm:
+                    continue
+                url = mm.group(1).rstrip('/')
+                entry_host = entry.replace('https://', '')
+                if url.endswith(entry_host) or not is_valid_domain_url(url):
+                    continue
+                if url not in domains:
+                    domains.append(url)
+                    print(f'[磁力宝] 发布页 {entry} 跳转到: {url}')
+
+    if CILIBAO_FALLBACK_SITE not in domains:
+        domains.append(CILIBAO_FALLBACK_SITE)
+
+    ok = []
+    for dom in domains:
+        try:
+            alive = cilibao_probe(dom)
+        except Exception as e:
+            print(f'[磁力宝] {dom} 探测失败: {type(e).__name__}: {e}')
+            continue
+        if alive:
+            print(f'[磁力宝] {dom} 可用')
+            ok.append(dom)
+        else:
+            print(f'[磁力宝] {dom} 不可用')
+    return ok
+
+
 def load_previous_domains():
     if not OUTPUT_FILE.exists():
         return {}
@@ -843,6 +970,7 @@ def main():
         'torrentgalaxy': [],
         'filemood': [],
         'btsow': [],
+        'cilibao': [],
     }
 
     result['xiaocao'] = extract_xiaocao_domains()
@@ -1104,7 +1232,8 @@ def main():
                      ('tpbweb', extract_tpbweb_domains),
                      ('torrentgalaxy', extract_torrentgalaxy_domains),
                      ('filemood', extract_filemood_domains),
-                     ('btsow', extract_btsow_domains)]:
+                     ('btsow', extract_btsow_domains),
+                     ('cilibao', extract_cilibao_domains)]:
         found = fn()
         if found:
             result[name] = found
@@ -1140,6 +1269,7 @@ def main():
     print(f'  TorrentGalaxy: {len(result["torrentgalaxy"])} 个')
     print(f'  FileMood: {len(result["filemood"])} 个')
     print(f'  BTSOW: {len(result["btsow"])} 个')
+    print(f'  磁力宝: {len(result["cilibao"])} 个')
     if result['cctv10']:
         print('  U3C3 域名:')
         for d in result['cctv10']:
@@ -1204,6 +1334,11 @@ def main():
     if result['btsow']:
         print('  BTSOW域名:')
         for d in result['btsow']:
+            print(f'    - {d}')
+
+    if result['cilibao']:
+        print('  磁力宝域名:')
+        for d in result['cilibao']:
             print(f'    - {d}')
 
 
