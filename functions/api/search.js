@@ -25,9 +25,6 @@ const LIMETORRENTS_SITE = 'https://www.limetorrents.fun';
 // 海盗湾 HTML 版站点域以 domains.json 的 piratebay 为准（check_domains.py 从 piratebayproxy.info 发现），这里只作保底
 const PIRATEBAY_SITE = 'https://thepiratebay.bond';
 
-// 1337x 站点域以 domains.json 的 x1337x 为准（check_domains.py 从 knaben.info 收录页发现），这里只作保底
-const X1337X_SITE = 'https://1337x.la';
-
 // 每个源的主页保底域名：只在 domains.json 该源域名池为空时用于右键跳转，避免个别源标签点了没反应
 const SOURCE_HOME_FALLBACKS = {
   '0magnet': 'https://0magnet.com',
@@ -40,7 +37,6 @@ const SOURCE_HOME_FALLBACKS = {
   cctv10: 'https://u3c3u3c3.u3c3u3c3u3c3.com',
   cilimao: 'https://clm65.top',
   ciliso: 'https://dfib32o2.3030117.xyz',
-  x1337x: X1337X_SITE,
   taocili: 'https://taocili9.shop',
   tpb: 'https://apibay.org',
   tpbweb: 'https://tpb.re',
@@ -70,7 +66,7 @@ export async function onRequest(context) {
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
 
-  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,x1337x,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood,btsow,cilibao,limetorrents';
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood,btsow,cilibao,limetorrents';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
   const wantSourceView = url.searchParams.get('perSource') === '1';
 
@@ -112,9 +108,6 @@ export async function onRequest(context) {
     }
     if (sources.includes('cilimao')) {
       tasks.push({ name: 'cilimao', promise: fetchFromCilimao(query, page, sort, waitUntil) });
-    }
-    if (sources.includes('x1337x')) {
-      tasks.push({ name: 'x1337x', promise: fetchFromX1337x(query) });
     }
     if (sources.includes('ciliso')) {
       tasks.push({ name: 'ciliso', promise: fetchFromCilibaike(query, page, sort, waitUntil, 'ciliso') });
@@ -2062,162 +2055,6 @@ async function fetchFromLimetorrents(query, page, sort, waitUntil) {
       if (items.length > 0) return items;
     } catch (err) {
       console.error(`Limetorrents domain ${domain} failed:`, err.message);
-    }
-  }
-  return [];
-}
-
-// ========== 1337x（列表页不给磁力链，要进详情页取；偶发 CF 验证页的域名自动跳过） ==========
-// 1337x 是宽松 OR 匹配：完整文件名（多点号）会退回热门列表，多词又噪音爆炸，
-// 所以发宽泛查询 + 本地核心词过滤，第 1 页没命中才补抓后面几页。
-const X1337X_UA = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-};
-const X1337X_BUDGET = 14000;        // 整个源的总耗时上限：详情页要逐条抓，不能拖垮整次搜索
-const X1337X_MAX_DETAIL = 15;       // 最多补抓 15 条详情，够填一页结果
-const X1337X_STOPWORDS = new Set(['and', 'or', 'the', 'a', 'an', 'of', 'for', 'with', 'in', 'on', 'at', 'to', 'by', 'is']);
-const QUERY_NOISE_RE = /^(?:s\d{1,2}(?:e\d{1,3})?|e\d{1,3}|\d{3,4}p|x26[45]|h26[45]|hevc|xvid|divx|web|webrip|webdl|dl|hdtv|bluray|brrip|bdrip|dvdrip|remux|repack|proper|internal|amzn|dsnp|nf|hmax|aac|ac3|eac3|ddp\d?|dts|10bit|hdr|sdr|multi|complete|season|episode|6ch|2ch)$/i;
-
-function normalizeTitle(s) {
-  return String(s == null ? '' : s).toLowerCase()
-    .replace(/[._+\-\[\](){}:,!?'"~\\/|@#$%^&*=<>;]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function tokenizeQuery(query) {
-  return normalizeTitle(query).split(' ').filter(Boolean);
-}
-
-/** 标题是否包含全部 token（子串匹配） */
-function titleMatchesTokens(title, tokens) {
-  if (!tokens || !tokens.length) return true;
-  const t = normalizeTitle(title);
-  return tokens.every((tok) => t.indexOf(tok) >= 0);
-}
-
-/** 宽泛查询：剥技术词 + 停用词，只留核心词发给站点（本地过滤保证精度） */
-function broadQuery(query) {
-  const tokens = tokenizeQuery(query);
-  const kept = tokens.filter((t) => !QUERY_NOISE_RE.test(t) && !X1337X_STOPWORDS.has(t));
-  return (kept.length ? kept : tokens).join(' ');
-}
-
-const X1337X_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
-
-/** 1337x 列表日期是 "May. 11th  '21" 这种写法，换算成 ISO 才能与其它源一起按时间排 */
-function isoFrom1337xDate(text) {
-  const m = String(text || '').trim().match(/^([a-z]{3})\.?\s+(\d{1,2})(?:st|nd|rd|th)?\s*'(\d{2,4})/i);
-  if (!m) return '';
-  const month = X1337X_MONTHS[m[1].slice(0, 3).toLowerCase()];
-  if (!month) return '';
-  let year = Number(m[3]);
-  if (year < 100) year += year > 80 ? 1900 : 2000;
-  const day = Number(m[2]);
-  if (day < 1 || day > 31) return '';
-  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-}
-
-// 不走 fetchWithCache：CF 验证页一旦被缓存，这个源会在缓存 TTL 内一直 0 结果。
-// 正常 1337x 页面也引用 challenge-platform 脚本，判定只认验证页标题，不能误伤真页。
-async function fetchX1337x(url, timeout) {
-  const resp = await fetch(url, {
-    headers: X1337X_UA,
-    signal: AbortSignal.timeout(Math.max(500, timeout)),
-  });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const text = await resp.text();
-  if (/<title>\s*(just a moment|attention required|请稍候)/i.test(text)) throw new Error('CF验证');
-  return text;
-}
-
-function parseX1337xRows(html) {
-  const rows = [...String(html || '').matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)].map((m) => m[1]).filter((r) => /torrent\/\d+/.test(r));
-  const items = [];
-  for (const row of rows) {
-    const link = [...row.matchAll(/<a[^>]*href="(\/torrent\/\d+\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/g)]
-      .find((m) => m[2].replace(/<[^>]+>/g, '').trim());
-    if (!link) continue;
-    const name = link[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
-    if (!name) continue;
-    items.push({
-      name,
-      detailPath: link[1],
-      size: ((row.match(/coll-4 size[^>]*>([^<]+)/) || [])[1] || '').trim(),
-      seeds: parseInt(((row.match(/coll-2 seeds[^>]*>([^<]+)/) || [])[1] || '0').replace(/[^\d]/g, '')) || 0,
-      peers: parseInt(((row.match(/coll-3 leeches[^>]*>([^<]+)/) || [])[1] || '0').replace(/[^\d]/g, '')) || 0,
-      date: isoFrom1337xDate(((row.match(/coll-date[^>]*>([^<]+)/) || [])[1] || '').trim()),
-    });
-  }
-  return items;
-}
-
-/** 详情页并发补磁力链：限量并发、单条失败跳过，整体不超预算 */
-async function attachX1337xMagnets(domain, rows, deadline) {
-  let idx = 0;
-  const worker = async () => {
-    while (idx < rows.length && Date.now() < deadline) {
-      const row = rows[idx++];
-      try {
-        const html = await fetchX1337x(`${domain}${row.detailPath}`, deadline - Date.now());
-        const m = html.match(/magnet:\?xt=urn:btih:[a-zA-Z0-9]+[^"'\s]*/);
-        if (m) row.magnet = simplifyMagnet(m[0]);
-      } catch (e) { /* 单条详情失败就跳过 */ }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(6, rows.length) }, worker));
-  return rows;
-}
-
-async function fetchFromX1337x(query) {
-  const cfg = getDomainsConfig().x1337x;
-  const domains = ((cfg && cfg.length) ? cfg : [X1337X_SITE]).slice(0, 4);
-  const sendQ = broadQuery(query);
-  const coreTokens = tokenizeQuery(sendQ);
-  const deadline = Date.now() + X1337X_BUDGET;
-
-  for (const domain of domains) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        let allRows = [];
-        let matched = [];
-        const collect = (html) => {
-          const rows = parseX1337xRows(html);
-          if (rows.length) {
-            allRows.push(...rows);
-            matched.push(...rows.filter((r) => titleMatchesTokens(r.name, coreTokens)));
-          }
-          return rows.length;
-        };
-        if (!collect(await fetchX1337x(`${domain}/search/${encodeURIComponent(sendQ)}/1/`, deadline - Date.now()))) {
-          break;  // 这个域拿不到列表，换下一个
-        }
-        // 第 1 页没命中才补抓后面几页：目标条常落在 2/3 页，命中即停不浪费请求
-        for (let p = 2; !matched.length && p <= 3 && Date.now() < deadline; p++) {
-          try { collect(await fetchX1337x(`${domain}/search/${encodeURIComponent(sendQ)}/${p}/`, deadline - Date.now())); }
-          catch (e) { break; }
-        }
-        // 一条都不匹配时退回全部：单核心词/中文查询场景 1337x 本就给不出精确匹配
-        const candidates = (matched.length ? matched : allRows).slice(0, X1337X_MAX_DETAIL);
-        await attachX1337xMagnets(domain, candidates, deadline);
-        const items = candidates.filter((it) => it.magnet).map((it) => ({
-          name: it.name,
-          size: it.size,
-          date: it.date,
-          seeds: it.seeds,
-          peers: it.peers,
-          magnet: it.magnet,
-          detailUrl: `${domain}${it.detailPath}`,
-          source: 'x1337x',
-        }));
-        if (items.length) return items;
-        break;
-      } catch (e) {
-        if (attempt === 0) continue;  // 重试一次，应对偶发 CF 验证
-        console.error(`1337x domain ${domain} failed:`, e.message);
-      }
     }
   }
   return [];
