@@ -814,22 +814,36 @@
     // ===== 结果缓存：切换源秒出 + 后台全源预取 =====
     const resultCache = new Map();          // key = `${query}||${sort}` -> { data(全源结果), ts }
 
-    // 各源站点主页：右键源标签跳转用；每次搜索响应会更新为最新域名
+    // 各源站点主页：右键源标签跳转用；启动时从 /domains.json 刷新，每次搜索响应再跟随最新域名
+    // 这里覆盖全部源，保证首屏（未搜索、未拉到 domains.json）右键也能打开
     let sourceSites = {
       '0magnet': 'https://0magnet.com',
-      'xiaocao': 'https://www.xccl260.xyz',
+      'xiaocao': 'https://www.xccl263.xyz',
       'juniorter': 'https://torrent.juniorter.in',
-      'cilibaike': 'https://thvj3342.8881067.xyz',
-      'knaben': 'https://knaben.xyz',
+      'cilibaike': 'https://ad497mnj.8881067.xyz',
+      'knaben': 'https://knaben.org',
       'yuhuage': 'https://www.yuhuage.fit',
-      'hufeng': 'https://xiudie.sbs',
+      'hufeng': 'https://huidie.sbs',
       'cctv10': 'https://u3c3u3c3.u3c3u3c3u3c3.com',
-      'cilimao': 'https://clm65.top',
-      'ciliso': 'https://dfib32o2.3030117.xyz',
-      'taocili': 'https://taocili9.shop',
+      'cilimao': 'https://clm10.vip',
+      'ciliso': 'https://ehc9vtfr.3030117.xyz',
+      'taocili': 'https://taocili12.shop',
       'tpb': 'https://apibay.org',
+      'tpbweb': 'https://tpb.re',
+      'piratebay': 'https://thepiratebay.bond',
+      'yts': 'https://yts.lt',
+      'miaocili': 'https://www.miaocili.org',
+      'xcisou': 'https://cili.cisoux.com',
+      'torrentgalaxy': 'https://torrentgalaxy.info',
+      'filemood': 'https://filemood.com',
       'therarbg': 'https://therarbg.com',
-      'eztv': 'https://eztvx.to',
+      'eztv': 'https://eztv.tf',
+      'btfox': 'https://btfox.xyz',
+      'zhongziba': 'https://seed8.org',
+      'cilichi': 'https://cilichi.com',
+      'btsow': 'https://btsow.live',
+      'cilibao': 'https://clb21.vip',
+      'limetorrents': 'https://www.limetorrents.fun',
     };
     const CACHE_TTL = 5 * 60 * 1000;        // 缓存 5 分钟
     const cacheKeyFor = (q, sort) => `${q}||${sort}`;
@@ -1218,8 +1232,26 @@
     }
 
 
+    // 启动即拉最新域名：部分源半小时换一次域，不搜索时右键也要指向当前可用站点
+    async function primeSourceSites() {
+      try {
+        const resp = await fetch('/domains.json', { cache: 'no-store' });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const fresh = { ...sourceSites };
+        for (const key of Object.keys(data)) {
+          const arr = data[key];
+          if (Array.isArray(arr) && arr.length) fresh[key] = arr[0];
+        }
+        sourceSites = fresh;
+      } catch (e) {
+        console.warn('源站点域名刷新失败，沿用内置域名:', e);
+      }
+    }
+
     loadQbConfig();
     buildChips();
+    primeSourceSites();
     refreshSourceStatus();   // 后台探测各源连通性，结果点亮绿/红点
 
     searchForm.addEventListener('submit', (e) => {

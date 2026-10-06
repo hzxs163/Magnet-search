@@ -22,6 +22,40 @@ const CILIBAO_SITE = 'https://clb21.vip';
 // LimeTorrents 站点域以 domains.json 的 limetorrents 为准（check_domains.py 从 knaben.info 收录页发现），这里只作保底
 const LIMETORRENTS_SITE = 'https://www.limetorrents.fun';
 
+// 海盗湾 HTML 版站点域以 domains.json 的 piratebay 为准（check_domains.py 从 piratebayproxy.info 发现），这里只作保底
+const PIRATEBAY_SITE = 'https://thepiratebay.bond';
+
+// 每个源的主页保底域名：只在 domains.json 该源域名池为空时用于右键跳转，避免个别源标签点了没反应
+const SOURCE_HOME_FALLBACKS = {
+  '0magnet': 'https://0magnet.com',
+  xiaocao: 'https://www.xccl260.xyz',
+  juniorter: 'https://torrent.juniorter.in',
+  cilibaike: 'https://thvj3342.8881067.xyz',
+  knaben: 'https://knaben.org',
+  yuhuage: 'https://www.yuhuage.fit',
+  hufeng: 'https://xiudie.sbs',
+  cctv10: 'https://u3c3u3c3.u3c3u3c3u3c3.com',
+  cilimao: 'https://clm65.top',
+  ciliso: 'https://dfib32o2.3030117.xyz',
+  taocili: 'https://taocili9.shop',
+  tpb: 'https://apibay.org',
+  tpbweb: 'https://tpb.re',
+  piratebay: PIRATEBAY_SITE,
+  yts: 'https://yts.lt',
+  miaocili: 'https://www.miaocili.org',
+  xcisou: 'https://search.cisoux.com',
+  torrentgalaxy: 'https://torrentgalaxy.info',
+  filemood: 'https://filemood.com',
+  therarbg: 'https://therarbg.com',
+  eztv: 'https://eztvx.to',
+  btfox: 'https://btfox20.top',
+  zhongziba: 'https://zzb10.vip',
+  cilichi: 'https://www.cilichi.pro',
+  btsow: BTSOW_SITE,
+  cilibao: CILIBAO_SITE,
+  limetorrents: LIMETORRENTS_SITE,
+};
+
 let CCTV10_DEBUG = {};
 let CILIMAO_DEBUG = {};
 
@@ -202,21 +236,14 @@ export async function onRequest(context) {
   }
 }
 
-// 各源站点主页（供前端"源标签右键跳转源站"用）
+// 各源站点主页（供前端"源标签右键跳转源站"用）：先铺保底域，再用 domains.json 实测可用的最新域覆盖
 function buildSourceSites() {
   const cfg = getDomainsConfig();
-  const sites = {};
+  const sites = { ...SOURCE_HOME_FALLBACKS };
   for (const key of Object.keys(cfg)) {
     const arr = cfg[key];
     if (Array.isArray(arr) && arr.length) sites[key] = arr[0];
   }
-  // 硬编码源（不在 domains.json 里）
-  sites['0magnet'] = 'https://0magnet.com';
-  sites['juniorter'] = 'https://torrent.juniorter.in';
-  sites['knaben'] = 'https://knaben.org';
-  if (!sites['btsow']) sites['btsow'] = BTSOW_SITE;  // 域名池为空时的保底
-  if (!sites['cilibao']) sites['cilibao'] = CILIBAO_SITE;
-  if (!sites['limetorrents']) sites['limetorrents'] = LIMETORRENTS_SITE;
   return sites;
 }
 
@@ -1555,7 +1582,7 @@ async function fetchFromTpb(query, page, sort, waitUntil) {
 // ========== PirateBay HTML 版（thepiratebay.bond） ==========
 async function fetchFromPiratebay(query, page, sort, waitUntil) {
   const cfg = getDomainsConfig().piratebay;
-  let domains = (cfg && cfg.length) ? [...cfg] : ['https://thepiratebay.bond'];
+  let domains = (cfg && cfg.length) ? [...cfg] : [PIRATEBAY_SITE];
   try {
     const proxyHtml = await fetchWithCache('https://piratebayproxy.info/', 3600, waitUntil);
     const found = [...proxyHtml.matchAll(/href="(https?:\/\/thepiratebay\.[a-z0-9.-]+)\/?/g)]
