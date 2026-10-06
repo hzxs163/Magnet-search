@@ -172,10 +172,17 @@ function buildProbes(cfg) {
       const r = await getJson(`${d}/apis/search?keyword=${b64Utf8Enc(PROBE_Q)}&base64=1&detail=1&start=0&count=1&type=all&sort=default`);
       return r.ok && !!r.j && r.j.code === 0;
     }),
+    // apibay 对同时打来的 28 个探测偶尔直接拒（429/5xx）：失败后隔 1.2s 再试一次，
+    // 免得把“搜索其实能用”的源误判成连不通；结果行顺序不稳，故全量找有效 id
     tpb: async () => {
-      const d = doms(cfg.tpb, 'https://apibay.org')[0];
-      const r = await getJson(`${d}/q.php?q=${enc(PROBE_Q)}&cat=0`);
-      return r.ok && Array.isArray(r.j) && r.j.length > 0 && String(r.j[0].id) !== '0';
+      const list = doms(cfg.tpb, 'https://apibay.org');
+      const once = async (d) => {
+        const r = await getJson(`${d}/q.php?q=${enc(PROBE_Q)}&cat=0`);
+        return r.ok && Array.isArray(r.j) && r.j.some((x) => x && String(x.id) !== '0');
+      };
+      if (await raceDomains(list, once) === true) return true;
+      await new Promise((r) => setTimeout(r, 1200));
+      return raceDomains(list, once);
     },
     tpbweb: async () => raceDomains(doms(cfg.tpbweb, 'https://tpb.re'), async (d) => {
       const r = await getJson(`${d}/api.php?url=/q.php?q=${enc(PROBE_Q)}&cat=`);
