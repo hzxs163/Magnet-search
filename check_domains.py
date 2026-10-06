@@ -1208,9 +1208,17 @@ def main():
             print(f'[海盗湾] knaben.info 提取失败: {e}')
         return []
 
-    # ========== TorrentGalaxy（WordPress JSON API） ==========
+    # ========== TorrentGalaxy（knaben.info 提取镜像，逐个探测 get-posts JSON） ==========
     def extract_torrentgalaxy_domains():
-        candidates = ['https://torrentgalaxy.info', 'https://torrentgalaxy.one']
+        try:
+            html = fetch_text('https://knaben.info/', timeout=15)
+            candidates = sorted(set(re.findall(r'https?://(?:www\.)?torrentgalaxy\.[a-z0-9.-]+', html)))
+        except Exception as e:
+            print(f'[TorrentGalaxy] knaben.info 提取失败: {e}')
+            candidates = []
+        if not candidates:
+            candidates = ['https://torrentgalaxy.info', 'https://torrentgalaxy.one']
+            print('[TorrentGalaxy] 改用内置候选: ' + ', '.join(candidates))
         domains = []
         for d in candidates:
             try:
