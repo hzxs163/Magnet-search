@@ -91,6 +91,10 @@ CILISO_CONFIG = {
     'salt': 'address-page-2026',
 }
 
+# ========== 1337x ==========
+# knaben.info 只收录部分镜像（1337x.la 就不在列），内置域与它取并集一起实探测
+X1337X_BUILTIN = ['https://1337x.la', 'https://1337x.st']
+
 OUTPUT_FILE = Path(__file__).parent / 'domains.json'
 
 HEADERS = {
@@ -955,6 +959,7 @@ def main():
         'cctv10': [],
         'cilimao': [],
         'ciliso': [],
+        'x1337x': [],
         'taocili': [],
         'tpb': [],
         'piratebay': [],
@@ -1258,6 +1263,44 @@ def main():
                 print(f'[LimeTorrents] {d} 探测失败: {e}')
         return domains[:5]
 
+    # ========== 1337x（knaben.info 取镜像 + 搜索列表实探测，剔除翻译/代理域与 CF 验证页） ==========
+    def extract_x1337x_domains():
+        try:
+            html = fetch_text('https://knaben.info/', timeout=15)
+            raw = set(re.findall(r'https?://[a-z0-9.-]*1337x[a-z0-9.-]*', html))
+            # 翻译/加速代理页会重写结果行，解析器吃不到；官方域 .to 已停站也留给探测去淘汰
+            candidates = sorted(d for d in raw if 'translate.goog' not in d and 'proxy' not in d)
+        except Exception as e:
+            print(f'[1337x] knaben.info 提取失败: {e}')
+            candidates = []
+        # knaben 只收录部分镜像（1337x.la 就不在列），内置可用域排在前面再并入 knaben 候选
+        candidates = list(dict.fromkeys(X1337X_BUILTIN + candidates))
+        print('[1337x] 候选: ' + ', '.join(candidates))
+        domains = []
+        for d in candidates:
+            for attempt in range(2):
+                try:
+                    # 用必定有结果的关键词探真页：能出 /torrent/数字/ 列表行才算可用
+                    text = fetch_text(f'{d}/search/avengers/1/', timeout=12)
+                    if re.search(r'just a moment|attention required|请稍候', text[:4000], re.I):
+                        raise RuntimeError('CF验证页')
+                    if re.search(r'torrent/\d+', text):
+                        print(f'[1337x] {d} 可用')
+                        domains.append(d)
+                    else:
+                        print(f'[1337x] {d} 无结果，跳过')
+                    break
+                except Exception as e:
+                    # 偶发验证页/连接失败重试一次再换下一个镜像
+                    if attempt == 0:
+                        print(f'[1337x] {d} {e}，重试')
+                        time.sleep(2)
+                        continue
+                    print(f'[1337x] {d} 探测失败: {e}')
+            if len(domains) >= 3:
+                break
+        return domains[:5]
+
     for name, fn in [('btfox', extract_btfox_domains),
                      ('zhongziba', extract_zhongziba_domains),
                      ('cilichi', extract_cilichi_domains),
@@ -1269,7 +1312,8 @@ def main():
                      ('filemood', extract_filemood_domains),
                      ('btsow', extract_btsow_domains),
                      ('cilibao', extract_cilibao_domains),
-                     ('limetorrents', extract_limetorrents_domains)]:
+                     ('limetorrents', extract_limetorrents_domains),
+                     ('x1337x', extract_x1337x_domains)]:
         found = fn()
         if found:
             result[name] = found
@@ -1293,6 +1337,7 @@ def main():
     print(f'  U3C3: {len(result["cctv10"])} 个')
     print(f'  磁力猫: {len(result["cilimao"])} 个')
     print(f'  磁力搜: {len(result["ciliso"])} 个')
+    print(f'  1337x: {len(result["x1337x"])} 个')
     print(f'  淘磁力: {len(result["taocili"])} 个')
     print(f'  TPB: {len(result["tpb"])} 个')
     print(f'  海盗湾HTML: {len(result["piratebay"])} 个')
