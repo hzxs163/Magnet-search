@@ -235,6 +235,14 @@
 
     .chip[data-on] .dot { background: var(--accent); }
 
+    /* 源连通性：绿=可达，红=不可达，灰=未探测；探测中先呼吸提示。
+       状态色必须压过“已勾选”的圆点色，故用 !important */
+    .chip .dot { background: var(--border-hover); }
+    .chip[data-status="up"] .dot { background: #22c55e !important; }
+    .chip[data-status="down"] .dot { background: #ef4444 !important; }
+    .chip[data-status="checking"] .dot { background: var(--border-hover) !important; animation: chip-probe 1s ease-in-out infinite; }
+    @keyframes chip-probe { 50% { opacity: 0.25; } }
+
     @media (max-width: 768px) {
       .chips {
         justify-content: flex-start;
@@ -1157,6 +1165,35 @@
         });
         chipsEl.appendChild(el);
       }
+      applySourceStatus();
+    }
+
+    // ---------- 源连通性检测：绿点=可达，红点=不可达 ----------
+    const sourceStatus = {};
+
+    function applySourceStatus() {
+      for (const el of chipsEl.querySelectorAll('.chip')) {
+        const st = sourceStatus[el.dataset.id];
+        if (!st) { el.removeAttribute('data-status'); el.removeAttribute('title'); continue; }
+        el.dataset.status = st;
+        el.title = st === 'up' ? '连通正常' : (st === 'down' ? '当前连不通' : '未探测');
+      }
+    }
+
+    async function refreshSourceStatus(force) {
+      const chips = [...chipsEl.querySelectorAll('.chip')];
+      chips.forEach((el) => { if (!sourceStatus[el.dataset.id]) el.dataset.status = 'checking'; });
+      try {
+        const resp = await fetch('/api/source-status' + (force ? '?refresh=1' : ''), { cache: 'no-store' });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        const got = (data && data.sources) || {};
+        for (const id of Object.keys(got)) sourceStatus[id] = got[id];
+      } catch (e) {
+        console.warn('源连通性检测失败:', e);
+        chips.forEach((el) => { if (el.dataset.status === 'checking') el.removeAttribute('data-status'); });
+      }
+      applySourceStatus();
     }
 
     function getSelectedSources() {
@@ -1182,6 +1219,7 @@
 
     loadQbConfig();
     buildChips();
+    refreshSourceStatus();   // 后台探测各源连通性，结果点亮绿/红点
 
     searchForm.addEventListener('submit', (e) => {
       e.preventDefault();
