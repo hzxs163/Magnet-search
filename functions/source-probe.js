@@ -257,6 +257,11 @@ function buildProbes(cfg) {
       return r.ok && !!r.j && Array.isArray(r.j.data);
     }),
     cilibao: async () => raceDomains(doms(cfg.cilibao, 'https://clb21.vip'), probeCilibao),
+    limetorrents: async () => raceDomains(doms(cfg.limetorrents, 'https://www.limetorrents.fun'), async (d) => {
+      // 只看是否有真实结果行：空结果页/盾页都是 200，靠 -torrent-id.html + 40 位 hash 区分
+      const r = await getRaw(`${d}/search/all/${enc(PROBE_Q)}/0/1/`);
+      return r.ok && /-torrent-\d+\.html/.test(r.text) && /itorrents\.net\/torrent\/[a-f0-9]{40}\.torrent/i.test(r.text);
+    }),
   };
 }
 

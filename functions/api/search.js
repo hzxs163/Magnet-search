@@ -19,6 +19,9 @@ const BTSOW_SITE = 'https://btsow.live';
 // 磁力宝站点域以 domains.json 的 cilibao 为准（check_domains.py 从发布页 clb.im 等发现），这里只作保底
 const CILIBAO_SITE = 'https://clb21.vip';
 
+// LimeTorrents 站点域以 domains.json 的 limetorrents 为准（check_domains.py 从 knaben.info 收录页发现），这里只作保底
+const LIMETORRENTS_SITE = 'https://www.limetorrents.fun';
+
 let CCTV10_DEBUG = {};
 let CILIMAO_DEBUG = {};
 
@@ -29,7 +32,7 @@ export async function onRequest(context) {
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
 
-  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood,btsow,cilibao';
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood,btsow,cilibao,limetorrents';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
   const wantSourceView = url.searchParams.get('perSource') === '1';
 
@@ -123,6 +126,9 @@ export async function onRequest(context) {
     if (sources.includes('cilibao')) {
       tasks.push({ name: 'cilibao', promise: fetchFromCilibao(query, page, sort, waitUntil) });
     }
+    if (sources.includes('limetorrents')) {
+      tasks.push({ name: 'limetorrents', promise: fetchFromLimetorrents(query, page, sort, waitUntil) });
+    }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
 
@@ -210,6 +216,7 @@ function buildSourceSites() {
   sites['knaben'] = 'https://knaben.org';
   if (!sites['btsow']) sites['btsow'] = BTSOW_SITE;  // 域名池为空时的保底
   if (!sites['cilibao']) sites['cilibao'] = CILIBAO_SITE;
+  if (!sites['limetorrents']) sites['limetorrents'] = LIMETORRENTS_SITE;
   return sites;
 }
 
@@ -255,6 +262,7 @@ function getDomainsConfig() {
     cilichi: Array.isArray(data.cilichi) ? data.cilichi : [],
     btsow: Array.isArray(data.btsow) ? data.btsow : [],
     cilibao: Array.isArray(data.cilibao) ? data.cilibao : [],
+    limetorrents: Array.isArray(data.limetorrents) ? data.limetorrents : [],
   };
 }
 
@@ -1943,6 +1951,83 @@ async function fetchFromFileMood(query, page, sort, waitUntil) {
       if (items.length > 0) return items;
     } catch (err) {
       console.error(`FileMood domain ${domain} failed:`, err.message);
+    }
+  }
+  return [];
+}
+
+// LimeTorrents 只给相对时间（"48 minutes ago"/"Yesterday"/"Last Month"），换算成 YYYY-MM-DD，否则前端按时间排序会失效
+function isoFromLtRelative(text) {
+  const s = String(text || '').trim().toLowerCase();
+  if (!s) return '';
+  const per = { second: 0, minute: 1 / 1440, hour: 1 / 24, day: 1, week: 7, month: 30, year: 365 };
+  let days;
+  const m = s.match(/^(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago/);
+  if (m) days = Number(m[1]) * per[m[2]];
+  else if (s === 'today') days = 0;
+  else if (s === 'yesterday') days = 1;
+  else if (s === 'last week') days = 7;
+  else if (s === 'last month') days = 30;
+  else if (s === 'last year') days = 365;
+  else if (/^\d+\s+years?\+?$/.test(s)) days = Number(s.match(/^(\d+)/)[1]) * 365;
+  if (days === undefined) return '';
+  return new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+}
+
+function parseLimetorrentsList(html, domain) {
+  const items = [];
+  for (const row of String(html || '').split('</tr>')) {
+    // 广告行也有 tdseed（伪装成速度列），靠“详情 URL 带 -torrent-id.html + 下载链接带 40 位 hash”双重判定剔除
+    const detailM = row.match(/<a href="(\/[^"]+-torrent-\d+\.html)"[^>]*>([\s\S]*?)<\/a>/);
+    const hashM = row.match(/itorrents\.net\/torrent\/([a-fA-F0-9]{40})\.torrent/i);
+    if (!detailM || !hashM) continue;
+    const name = detailM[2]
+      .replace(/<[^>]+>/g, '')
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/\s+/g, ' ').trim();
+    if (!name) continue;
+    let size = '', added = '';
+    const cellRe = /<td class="tdnormal">([\s\S]*?)<\/td>/g;
+    let c;
+    while ((c = cellRe.exec(row)) !== null) {
+      const t = c[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+      if (!t) continue;
+      if (!size && /^\d[\d.]*\s+(Bytes|KB|MB|GB|TB)$/i.test(t)) size = t;
+      else if (!added) added = t.split(' - in ')[0].trim();
+    }
+    const seedsM = row.match(/<td class="tdseed">([\s\S]*?)<\/td>/);
+    const leechM = row.match(/<td class="tdleech">([\s\S]*?)<\/td>/);
+    items.push({
+      name,
+      size,
+      date: isoFromLtRelative(added),
+      magnet: `magnet:?xt=urn:btih:${hashM[1].toLowerCase()}`,
+      detailUrl: domain + detailM[1],
+      source: 'limetorrents',
+      seeds: parseInt(seedsM && seedsM[1].replace(/<[^>]+>/g, ''), 10) || 0,
+      peers: parseInt(leechM && leechM[1].replace(/<[^>]+>/g, ''), 10) || 0,
+    });
+  }
+  return items;
+}
+
+// ========== LimeTorrents（服务端渲染 /search/all/{kw}/{sort}/{page}/，下载链 itorrents.net 内含 infohash） ==========
+async function fetchFromLimetorrents(query, page, sort, waitUntil) {
+  const cfg = getDomainsConfig().limetorrents;
+  const domains = (cfg && cfg.length) ? cfg : [LIMETORRENTS_SITE];
+  const pageNum = Math.max(1, page || 1);
+  let sortTok = 'date';
+  if (sort === 'relevance' || sort === 'rele' || sort === 'all') sortTok = '0';
+  else if (sort === 'seeders' || sort === 'hits' || sort === 'requests') sortTok = 'seeds';
+  else if (sort === 'length' || sort === 'size') sortTok = 'size';
+  for (const domain of domains) {
+    try {
+      const url = `${domain}/search/all/${encodeURIComponent(query)}/${sortTok}/${pageNum}/`;
+      const text = await fetchWithCache(url, 900, waitUntil);
+      const items = parseLimetorrentsList(text, domain);
+      if (items.length > 0) return items;
+    } catch (err) {
+      console.error(`Limetorrents domain ${domain} failed:`, err.message);
     }
   }
   return [];

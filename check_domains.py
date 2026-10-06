@@ -971,6 +971,7 @@ def main():
         'filemood': [],
         'btsow': [],
         'cilibao': [],
+        'limetorrents': [],
     }
 
     result['xiaocao'] = extract_xiaocao_domains()
@@ -1231,6 +1232,32 @@ def main():
                 print(f'[TorrentGalaxy] {d} 探测失败: {e}')
         return domains
 
+    # ========== LimeTorrents（knaben.info 提取镜像，逐个探测搜索页真实结果行） ==========
+    def extract_limetorrents_domains():
+        try:
+            html = fetch_text('https://knaben.info/', timeout=15)
+            raw = set(re.findall(r'https?://[a-z0-9.-]*limetorrent[a-z0-9.-]*', html))
+            # 翻译/加速代理页会把结果行重写，解析器吃不到，故只留自有域
+            candidates = sorted(d for d in raw if 'translate.goog' not in d and 'proxy' not in d)
+        except Exception as e:
+            print(f'[LimeTorrents] knaben.info 提取失败: {e}')
+            candidates = []
+        if not candidates:
+            candidates = ['https://www.limetorrents.fun']
+            print('[LimeTorrents] 改用内置候选: ' + ', '.join(candidates))
+        domains = []
+        for d in candidates:
+            try:
+                text = fetch_text(f'{d}/search/all/jerry/0/1/', timeout=12, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                })
+                if re.search(r'-torrent-\d+\.html', text) and re.search(r'itorrents\.net/torrent/[a-fA-F0-9]{40}\.torrent', text):
+                    print(f'[LimeTorrents] {d} 可用')
+                    domains.append(d)
+            except Exception as e:
+                print(f'[LimeTorrents] {d} 探测失败: {e}')
+        return domains[:5]
+
     for name, fn in [('btfox', extract_btfox_domains),
                      ('zhongziba', extract_zhongziba_domains),
                      ('cilichi', extract_cilichi_domains),
@@ -1241,7 +1268,8 @@ def main():
                      ('torrentgalaxy', extract_torrentgalaxy_domains),
                      ('filemood', extract_filemood_domains),
                      ('btsow', extract_btsow_domains),
-                     ('cilibao', extract_cilibao_domains)]:
+                     ('cilibao', extract_cilibao_domains),
+                     ('limetorrents', extract_limetorrents_domains)]:
         found = fn()
         if found:
             result[name] = found
@@ -1278,6 +1306,7 @@ def main():
     print(f'  FileMood: {len(result["filemood"])} 个')
     print(f'  BTSOW: {len(result["btsow"])} 个')
     print(f'  磁力宝: {len(result["cilibao"])} 个')
+    print(f'  LimeTorrents: {len(result["limetorrents"])} 个')
     if result['cctv10']:
         print('  U3C3 域名:')
         for d in result['cctv10']:
@@ -1347,6 +1376,11 @@ def main():
     if result['cilibao']:
         print('  磁力宝域名:')
         for d in result['cilibao']:
+            print(f'    - {d}')
+
+    if result['limetorrents']:
+        print('  LimeTorrents域名:')
+        for d in result['limetorrents']:
             print(f'    - {d}')
 
 
