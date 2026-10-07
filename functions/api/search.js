@@ -22,6 +22,9 @@ const CILIBAO_SITE = 'https://clb21.vip';
 // LimeTorrents 站点域以 domains.json 的 limetorrents 为准（check_domains.py 从 knaben.info 收录页发现），这里只作保底
 const LIMETORRENTS_SITE = 'https://www.limetorrents.fun';
 
+// 蜜柑计划站点域以 domains.json 的 mikan 为准（check_domains.py 从内置候选实探测），这里只作保底
+const MIKAN_SITE = 'https://mikanime.tv';
+
 // 海盗湾 HTML 版站点域以 domains.json 的 piratebay 为准（check_domains.py 从 piratebayproxy.info 发现），这里只作保底
 const PIRATEBAY_SITE = 'https://thepiratebay.bond';
 
@@ -54,6 +57,7 @@ const SOURCE_HOME_FALLBACKS = {
   btsow: BTSOW_SITE,
   cilibao: CILIBAO_SITE,
   limetorrents: LIMETORRENTS_SITE,
+  mikan: MIKAN_SITE,
 };
 
 let CCTV10_DEBUG = {};
@@ -66,7 +70,7 @@ export async function onRequest(context) {
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
 
-  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood,btsow,cilibao,limetorrents';
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood,btsow,cilibao,limetorrents,mikan';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
   const wantSourceView = url.searchParams.get('perSource') === '1';
 
@@ -162,6 +166,9 @@ export async function onRequest(context) {
     }
     if (sources.includes('limetorrents')) {
       tasks.push({ name: 'limetorrents', promise: fetchFromLimetorrents(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('mikan')) {
+      tasks.push({ name: 'mikan', promise: fetchFromMikan(query, page, sort, waitUntil) });
     }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
@@ -290,6 +297,7 @@ function getDomainsConfig() {
     btsow: Array.isArray(data.btsow) ? data.btsow : [],
     cilibao: Array.isArray(data.cilibao) ? data.cilibao : [],
     limetorrents: Array.isArray(data.limetorrents) ? data.limetorrents : [],
+    mikan: Array.isArray(data.mikan) ? data.mikan : [],
   };
 }
 
@@ -2055,6 +2063,108 @@ async function fetchFromLimetorrents(query, page, sort, waitUntil) {
       if (items.length > 0) return items;
     } catch (err) {
       console.error(`Limetorrents domain ${domain} failed:`, err.message);
+    }
+  }
+  return [];
+}
+
+// ========== 蜜柑计划（Mikan Project） ==========
+// 新番/动画字幕组源。搜索页 /Home/Search?searchstr={kw} 服务端渲染，磁力直接挂在每行
+// checkbox 的 data-magnet 上（40 位 btih），不需要二次抓详情页。
+// 站点没有服务端翻页与排序：实测 page=N / sort=date / p=N 返回的都是同一整页，且按时间倒序；
+// 热门词整页可达 1000 行 / 4.3MB，所以整页缓存下来后在 Worker 内排序切片。
+// 标题是 HTML 数字实体（&#x767D; 这种），不解码前端会原样显示实体串。
+const MIKAN_PAGE_SIZE = 50;
+// 整页最多解析 MIKAN_MAX_ROWS 行：热门词整页 1000 行 / 4.3MB，全量解析会把整轮聚合拖慢，
+// 而前端一页只展示 50 条，取前 200 行足够翻页用。
+const MIKAN_MAX_ROWS = 200;
+// 站点是 CN 主机，CF 出口取整页偶发超过 10s，超时即换下一个域名/放弃本源，不拖后腿
+const MIKAN_FETCH_TIMEOUT_MS = 9000;
+
+function decodeMikanEntities(s) {
+  return String(s || '')
+    .replace(/&#x([0-9a-fA-F]{1,6});/g, (m, h) => mikanCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d{1,6});/g, (m, d) => mikanCodePoint(Number(d)))
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+function mikanCodePoint(cp) {
+  try {
+    return String.fromCodePoint(cp);
+  } catch (e) {
+    return '';
+  }
+}
+
+function mikanSizeBytes(size) {
+  const m = String(size || '').match(/^([\d.]+)\s*(B|KB|MB|GB|TB)$/i);
+  if (!m) return 0;
+  const units = { b: 1, kb: 1024, mb: 1048576, gb: 1073741824, tb: 1099511627776 };
+  return parseFloat(m[1]) * units[m[2].toLowerCase()];
+}
+
+function parseMikanList(html, domain) {
+  const items = [];
+  const rows = String(html || '').split('<tr class="js-search-results-row"');
+  const limit = Math.min(rows.length, MIKAN_MAX_ROWS + 1);
+  for (let i = 1; i < limit; i++) {
+    const row = rows[i].split('</tr>')[0];
+    const magnetM = row.match(/data-magnet="(magnet:\?xt=urn:btih:([a-fA-F0-9]{40}))[^"]*"/i);
+    const titleM = row.match(/class="magnet-link-wrap">([\s\S]*?)<\/a>/);
+    if (!magnetM || !titleM) continue;
+    const name = decodeMikanEntities(titleM[1].replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim();
+    if (!name) continue;
+    let size = '';
+    let date = '';
+    const cells = row.match(/<td[^>]*>([\s\S]*?)<\/td>/g) || [];
+    for (const cell of cells) {
+      const text = decodeMikanEntities(cell.replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      if (!size && /^[\d.]+\s*(B|KB|MB|GB|TB)$/i.test(text)) size = text;
+      else if (!date) {
+        // 站点日期是 2026/07/16 00:52（斜杠），别的域名给横杠，统一归一成 YYYY-MM-DD HH:MM:SS
+        const dm = text.match(/^(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
+        if (dm) date = `${dm[1]}-${dm[2]}-${dm[3]} ${dm[4]}:${dm[5]}:${dm[6] || '00'}`;
+      }
+    }
+    items.push({
+      name,
+      size,
+      date,
+      magnet: magnetM[1],
+      detailUrl: `${domain}/Home/Episode/${magnetM[2]}`,
+      source: 'mikan',
+    });
+  }
+  return items;
+}
+
+async function fetchFromMikan(query, page, sort, waitUntil) {
+  const cfg = getDomainsConfig().mikan;
+  const domains = (cfg && cfg.length) ? cfg : [MIKAN_SITE];
+  const pageNum = Math.max(1, page || 1);
+  for (const domain of domains) {
+    try {
+      const url = `${domain}/Home/Search?searchstr=${encodeURIComponent(query)}`;
+      const html = await Promise.race([
+        fetchWithCache(url, 1800, waitUntil),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('mikan fetch timeout')), MIKAN_FETCH_TIMEOUT_MS)),
+      ]);
+      const items = parseMikanList(html, domain);
+      if (items.length === 0) continue;
+      // 站点固定按时间倒序，只有按大小排时需要本地重排；时间排序与站点顺序一致，不必再动
+      if (sort === 'length' || sort === 'size') {
+        items.sort((a, b) => mikanSizeBytes(b.size) - mikanSizeBytes(a.size));
+      }
+      const start = (pageNum - 1) * MIKAN_PAGE_SIZE;
+      return items.slice(start, start + MIKAN_PAGE_SIZE);
+    } catch (err) {
+      console.error(`Mikan domain ${domain} failed:`, err.message);
     }
   }
   return [];

@@ -86,6 +86,13 @@ function decodeAtobPayload(html) {
   try { return decodeURIComponent(atob(m[1])); } catch (e) { return ''; }
 }
 
+// 蜜柑计划：搜索页没有小代价的探测方式（整页 1.4MB 起，热门词 4.3MB），
+// 且站点是 CN 主机、CF 出口偶发慢，探活只取首页（180KB）看搜索表单还在不在。
+async function probeMikan(domain) {
+  const r = await getRaw(`${domain}/`);
+  return r.ok && r.text.includes('Mikan Project') && r.text.includes('/Home/Search');
+}
+
 // 磁力宝：首访任意路径都会拿到“点击验证”页，需 POST act=challenge 解锁会话
 async function probeCilibao(domain) {
   const url = `${domain}/s/${b64Utf8Enc(PROBE_Q)}?sort=rel&page=1`;
@@ -262,6 +269,7 @@ function buildProbes(cfg) {
       const r = await getRaw(`${d}/search/all/${enc(PROBE_Q)}/0/1/`);
       return r.ok && /-torrent-\d+\.html/.test(r.text) && /itorrents\.net\/torrent\/[a-f0-9]{40}\.torrent/i.test(r.text);
     }),
+    mikan: async () => raceDomains(doms(cfg.mikan, 'https://mikanime.tv'), probeMikan),
   };
 }
 

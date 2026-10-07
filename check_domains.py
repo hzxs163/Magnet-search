@@ -12,6 +12,7 @@
 9. BTSOW（btsow）：从官方发布页 tellme.pw/btsow 提取站点域，POST 私有接口实探测
 10. 磁力宝（cilibao）：从发布页 clb.im / cilibao.app / cilibao.top 解码 JS 跳转拿落地域，
     搜索页带“点击验证”墙，需先 POST act=challenge 解锁 PHPSESSID 会话再探测
+11. 蜜柑计划（mikan）：knaben.info 不收录这个站，域名靠内置候选实探测
 把生成的域名写入 domains.json，验证交给 Workers 运行时做
 
 依赖：curl_cffi（用于模拟 Chrome TLS 指纹，绕过 WAF 403）
@@ -972,6 +973,7 @@ def main():
         'btsow': [],
         'cilibao': [],
         'limetorrents': [],
+        'mikan': [],
     }
 
     result['xiaocao'] = extract_xiaocao_domains()
@@ -1258,6 +1260,24 @@ def main():
                 print(f'[LimeTorrents] {d} 探测失败: {e}')
         return domains[:5]
 
+    def extract_mikan_domains():
+        # 蜜柑计划不在 knaben.info 收录，也没有发布页可抓（换域时只能靠站内公告），
+        # 这里保留两个已知站点域逐个实探测：能返回结果行且磁力在 data-magnet 上才算可用。
+        # mikanime.tv 国内可直连、mikanani.me 国内被 DNS 污染，两个都探，探通的按顺序进池子。
+        candidates = ['https://mikanime.tv', 'https://mikanani.me']
+        domains = []
+        for d in candidates:
+            try:
+                text = fetch_text(f'{d}/Home/Search?searchstr=Shirobako', timeout=20, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                })
+                if 'js-search-results-row' in text and 'data-magnet="magnet:' in text:
+                    print(f'[蜜柑计划] {d} 可用')
+                    domains.append(d)
+            except Exception as e:
+                print(f'[蜜柑计划] {d} 探测失败: {e}')
+        return domains
+
     for name, fn in [('btfox', extract_btfox_domains),
                      ('zhongziba', extract_zhongziba_domains),
                      ('cilichi', extract_cilichi_domains),
@@ -1269,7 +1289,8 @@ def main():
                      ('filemood', extract_filemood_domains),
                      ('btsow', extract_btsow_domains),
                      ('cilibao', extract_cilibao_domains),
-                     ('limetorrents', extract_limetorrents_domains)]:
+                     ('limetorrents', extract_limetorrents_domains),
+                     ('mikan', extract_mikan_domains)]:
         found = fn()
         if found:
             result[name] = found
@@ -1307,6 +1328,7 @@ def main():
     print(f'  BTSOW: {len(result["btsow"])} 个')
     print(f'  磁力宝: {len(result["cilibao"])} 个')
     print(f'  LimeTorrents: {len(result["limetorrents"])} 个')
+    print(f'  蜜柑计划: {len(result["mikan"])} 个')
     if result['cctv10']:
         print('  U3C3 域名:')
         for d in result['cctv10']:
@@ -1381,6 +1403,11 @@ def main():
     if result['limetorrents']:
         print('  LimeTorrents域名:')
         for d in result['limetorrents']:
+            print(f'    - {d}')
+
+    if result['mikan']:
+        print('  蜜柑计划域名:')
+        for d in result['mikan']:
             print(f'    - {d}')
 
 
