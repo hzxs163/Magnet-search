@@ -13,6 +13,8 @@
 10. 磁力宝（cilibao）：从发布页 clb.im / cilibao.app / cilibao.top 解码 JS 跳转拿落地域，
     搜索页带“点击验证”墙，需先 POST act=challenge 解锁 PHPSESSID 会话再探测
 11. 蜜柑计划（mikan）：knaben.info 不收录这个站，域名靠内置候选实探测
+12. 星愿磁力（avfan）：会员站，域名从 Telegram 频道页 t.me/s/avfanzh 提取；
+    磁力接口必须带登录会话（环境变量 AVFAN_COOKIE），没配就跳过探测、保留上次域名
 把生成的域名写入 domains.json，验证交给 Workers 运行时做
 
 依赖：curl_cffi（用于模拟 Chrome TLS 指纹，绕过 WAF 403）
@@ -21,6 +23,7 @@
 import array  # UTF-16 码元 <-> 字节，用于还原 xccl 的 document.write 载荷
 import base64
 import json
+import os
 import re
 import time
 import urllib.request
@@ -974,6 +977,7 @@ def main():
         'cilibao': [],
         'limetorrents': [],
         'mikan': [],
+        'avfan': [],
     }
 
     result['xiaocao'] = extract_xiaocao_domains()
@@ -1260,6 +1264,39 @@ def main():
                 print(f'[LimeTorrents] {d} 探测失败: {e}')
         return domains[:5]
 
+    def extract_avfan_domains():
+        # 域名来源是 Telegram 频道 t.me/avfanzh（Actions 的境外 runner 能直连 t.me，本机被墙）。
+        # 这站是会员站：不带会话 cookie 时磁力接口一律 401，探活无从判定，
+        # 所以没有 AVFAN_COOKIE 就返回空，让主流程保留上一次的域名而不是把池子清空。
+        cookie = (os.environ.get('AVFAN_COOKIE') or '').strip()
+        if not cookie:
+            print('[星愿磁力] 未配置 AVFAN_COOKIE，跳过探测（会员站匿名拿不到磁力），保留上次域名')
+            return []
+        cands = set()
+        try:
+            html = fetch_text('https://t.me/s/avfanzh', timeout=20)
+            # 频道里换域公告常写成纯文本，取所有含 avfan/av4ch 字样的 http(s) 站点域
+            for d in re.findall(r'https?://[a-zA-Z0-9.\-]*(?:avfan|av4ch)[a-zA-Z0-9.\-]*\.[a-z]{2,}', html):
+                cands.add(d.rstrip('/'))
+        except Exception as e:
+            print(f'[星愿磁力] 频道页提取失败: {e}')
+        cands.add('https://avfan.com')
+        ok = []
+        for d in sorted(cands):
+            try:
+                text = fetch_text(f'{d}/search_magnets?q=jerry&mm=smart&ob=default&sf=none&tf=none&page=1',
+                                  timeout=25,
+                                  headers={**HEADERS, 'Referer': d + '/', 'Cookie': cookie})
+                if 'urn:btih:' in text:
+                    print(f'[星愿磁力] {d} 可用')
+                    ok.append(d)
+                else:
+                    # 会话 cookie 是按域发的：换到别的注册域时不会带上，这里就会探空
+                    print(f'[星愿磁力] {d} 无磁力结果（会话在该域不生效或已过期）')
+            except Exception as e:
+                print(f'[星愿磁力] {d} 探测失败: {e}')
+        return ok[:5]
+
     def extract_mikan_domains():
         # 蜜柑计划不在 knaben.info 收录，也没有发布页可抓（换域时只能靠站内公告），
         # 这里保留两个已知站点域逐个实探测：能返回结果行且磁力在 data-magnet 上才算可用。
@@ -1290,7 +1327,8 @@ def main():
                      ('btsow', extract_btsow_domains),
                      ('cilibao', extract_cilibao_domains),
                      ('limetorrents', extract_limetorrents_domains),
-                     ('mikan', extract_mikan_domains)]:
+                     ('mikan', extract_mikan_domains),
+                     ('avfan', extract_avfan_domains)]:
         found = fn()
         if found:
             result[name] = found
@@ -1329,6 +1367,7 @@ def main():
     print(f'  磁力宝: {len(result["cilibao"])} 个')
     print(f'  LimeTorrents: {len(result["limetorrents"])} 个')
     print(f'  蜜柑计划: {len(result["mikan"])} 个')
+    print(f'  星愿磁力: {len(result["avfan"])} 个')
     if result['cctv10']:
         print('  U3C3 域名:')
         for d in result['cctv10']:
@@ -1408,6 +1447,11 @@ def main():
     if result['mikan']:
         print('  蜜柑计划域名:')
         for d in result['mikan']:
+            print(f'    - {d}')
+
+    if result['avfan']:
+        print('  星愿磁力域名:')
+        for d in result['avfan']:
             print(f'    - {d}')
 
 

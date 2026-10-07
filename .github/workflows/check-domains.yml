@@ -25,6 +25,10 @@ jobs:
         run: pip install curl_cffi
 
       - name: Extract domains
+        # avfan 是会员站：磁力接口必须带会话 cookie 才能探活。没配这个 secret 时
+        # check_domains.py 会跳过 avfan 探测并保留上次的域名，不影响其它源。
+        env:
+          AVFAN_COOKIE: ${{ secrets.AVFAN_COOKIE }}
         run: python check_domains.py
 
       - name: Commit and push if changed

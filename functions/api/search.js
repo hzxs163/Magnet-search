@@ -25,6 +25,9 @@ const LIMETORRENTS_SITE = 'https://www.limetorrents.fun';
 // 蜜柑计划站点域以 domains.json 的 mikan 为准（check_domains.py 从内置候选实探测），这里只作保底
 const MIKAN_SITE = 'https://mikanime.tv';
 
+// 星愿磁力（avfan）站点域以 domains.json 的 avfan 为准（check_domains.py 从 t.me/avfanzh 频道页发现），这里只作保底
+const AVFAN_SITE = 'https://avfan.com';
+
 // 海盗湾 HTML 版站点域以 domains.json 的 piratebay 为准（check_domains.py 从 piratebayproxy.info 发现），这里只作保底
 const PIRATEBAY_SITE = 'https://thepiratebay.bond';
 
@@ -58,20 +61,25 @@ const SOURCE_HOME_FALLBACKS = {
   cilibao: CILIBAO_SITE,
   limetorrents: LIMETORRENTS_SITE,
   mikan: MIKAN_SITE,
+  avfan: AVFAN_SITE,
 };
 
 let CCTV10_DEBUG = {};
 let CILIMAO_DEBUG = {};
 let MIKAN_DEBUG = {};
+let AVFAN_DEBUG = {};
+// 会员会话：来自 Pages 环境变量 AVFAN_COOKIE（绝不写进仓库）；没有它这个源直接跳过
+let AVFAN_COOKIE = '';
 
 export async function onRequest(context) {
   const { request, waitUntil } = context;
+  AVFAN_COOKIE = (context.env && context.env.AVFAN_COOKIE) || '';
   const url = new URL(request.url);
   const query = url.searchParams.get('q');
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
 
-  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood,btsow,cilibao,limetorrents,mikan';
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood,btsow,cilibao,limetorrents,mikan,avfan';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
   const wantSourceView = url.searchParams.get('perSource') === '1';
 
@@ -82,6 +90,7 @@ export async function onRequest(context) {
   CCTV10_DEBUG = {};
   CILIMAO_DEBUG = {};
   MIKAN_DEBUG = {};
+  AVFAN_DEBUG = {};
 
   const startTime = Date.now();
 
@@ -172,6 +181,9 @@ export async function onRequest(context) {
     if (sources.includes('mikan')) {
       tasks.push({ name: 'mikan', promise: fetchFromMikan(query, page, sort, waitUntil) });
     }
+    if (sources.includes('avfan')) {
+      tasks.push({ name: 'avfan', promise: fetchFromAvfan(query, page, sort, waitUntil) });
+    }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
 
@@ -236,13 +248,14 @@ export async function onRequest(context) {
         cctv10Raw: CCTV10_DEBUG,
         cilimaoRaw: CILIMAO_DEBUG,
         mikanRaw: MIKAN_DEBUG,
+        avfanRaw: AVFAN_DEBUG,
         ...debug,
       },
     });
 
   } catch (err) {
     console.error('Search error:', err);
-    return jsonResponse({ error: 'Search failed', detail: String(err), cctv10Raw: CCTV10_DEBUG, cilimaoRaw: CILIMAO_DEBUG }, 502);
+    return jsonResponse({ error: 'Search failed', detail: String(err), cctv10Raw: CCTV10_DEBUG, cilimaoRaw: CILIMAO_DEBUG, avfanRaw: AVFAN_DEBUG }, 502);
   }
 }
 
@@ -301,6 +314,7 @@ function getDomainsConfig() {
     cilibao: Array.isArray(data.cilibao) ? data.cilibao : [],
     limetorrents: Array.isArray(data.limetorrents) ? data.limetorrents : [],
     mikan: Array.isArray(data.mikan) ? data.mikan : [],
+    avfan: Array.isArray(data.avfan) ? data.avfan : [],
   };
 }
 
@@ -2227,6 +2241,119 @@ async function fetchFromMikan(query, page, sort, waitUntil) {
       rec.ms = Date.now() - t0;
       rec.err = `${err && err.name ? err.name : ''} ${err.message}`.trim();
       console.error(`Mikan domain ${domain} failed:`, err.message);
+    }
+  }
+  return [];
+}
+
+// ========== 星愿磁力（avfan） ==========
+// 会员站：磁力只在 /search_magnets?q= 里，且必须带登录会话（Pages 环境变量 AVFAN_COOKIE），
+// 匿名请求一律 401，所以没配凭据时本源直接跳过（不是坏了，是没登录）。
+// 接口按 Accept 协商：给 application/json 会 406，必须像浏览器一样要 text/html 才返回渲染页。
+// 每页 20 条，条目没有详情页（只有磁力与第三方播放链），detailUrl 留空；
+// info 行形如“6个文件, 1.89GB, 2021-08-16”。排序用站方参数 ob=default|created_at|size|files_count，
+// 翻页用 page=N（真翻页，服务端支持，无需本地切片）。
+const AVFAN_FETCH_TIMEOUT_MS = 9000;
+
+function avfanSortTok(sort) {
+  if (sort === 'length' || sort === 'size') return 'size';
+  if (sort === 'time' || sort === 'newest') return 'created_at';
+  return 'default';
+}
+
+async function fetchAvfanPage(url, waitUntil) {
+  const cacheKey = new Request(url, { method: 'GET' });
+  const hit = await caches.default.match(cacheKey);
+  if (hit) return await hit.text();
+
+  const resp = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9',
+      'Referer': new URL(url).origin + '/',
+      'Cookie': AVFAN_COOKIE,
+    },
+    signal: AbortSignal.timeout(AVFAN_FETCH_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const text = await resp.text();
+
+  // 只缓存真出磁力的页面：会话失效时会被 302 到登录页（200 空壳），缓存下来会把源冻死半小时
+  if (text.includes('urn:btih:') && waitUntil) {
+    waitUntil(caches.default.put(cacheKey, new Response(text, {
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'public, max-age=1800',
+      },
+    })));
+  }
+  return text;
+}
+
+function parseAvfanList(html, domain) {
+  const items = [];
+  const blocks = String(html || '').split('<div class="py-4 px-2 border-b');
+  for (let i = 1; i < blocks.length; i++) {
+    const block = blocks[i];
+    const linkM = block.match(/href="magnet:\?xt=urn:btih:([a-fA-F0-9]{40})[^"]*"[^>]*>([\s\S]*?)<\/a>/);
+    if (!linkM) continue;
+    const name = decodeMikanEntities(linkM[2].replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim();
+    if (!name) continue;
+    let size = '';
+    let date = '';
+    const infoM = block.match(/class="info[^"]*">([\s\S]*?)<\/div>/);
+    if (infoM) {
+      const info = decodeMikanEntities(infoM[1].replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+      for (const piece of info.split(',')) {
+        const p = piece.trim();
+        if (!p) continue;
+        if (!size && /^[\d.]+\s*(B|KB|MB|GB|TB)$/i.test(p)) size = p;
+        else if (!date) {
+          const dm = p.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+          if (dm) date = `${dm[1]}-${dm[2].padStart(2, '0')}-${dm[3].padStart(2, '0')} 00:00:00`;
+        }
+      }
+    }
+    items.push({
+      name,
+      size,
+      date,
+      magnet: `magnet:?xt=urn:btih:${linkM[1]}`,
+      detailUrl: '',
+      source: 'avfan',
+    });
+  }
+  return items;
+}
+
+async function fetchFromAvfan(query, page, sort, waitUntil) {
+  AVFAN_DEBUG.hasCookie = !!AVFAN_COOKIE;
+  if (!AVFAN_COOKIE) {
+    AVFAN_DEBUG.skipped = 'no_cookie';
+    return [];
+  }
+  const cfg = getDomainsConfig().avfan;
+  const domains = (cfg && cfg.length) ? cfg : [AVFAN_SITE];
+  const pageNum = Math.max(1, page || 1);
+  AVFAN_DEBUG.domains = domains;
+  AVFAN_DEBUG.attempts = [];
+  for (const domain of domains) {
+    const rec = { domain, ms: 0 };
+    const t0 = Date.now();
+    AVFAN_DEBUG.attempts.push(rec);
+    try {
+      const url = `${domain}/search_magnets?q=${encodeURIComponent(query)}`
+        + `&mm=smart&ob=${avfanSortTok(sort)}&sf=none&tf=none&page=${pageNum}`;
+      const html = await fetchAvfanPage(url, waitUntil);
+      const items = parseAvfanList(html, domain);
+      rec.bytes = html.length;
+      rec.items = items.length;
+      if (items.length > 0) return items;
+    } catch (err) {
+      rec.ms = Date.now() - t0;
+      rec.err = `${err && err.name ? err.name : ''} ${err.message}`.trim();
+      console.error(`Avfan domain ${domain} failed:`, err.message);
     }
   }
   return [];

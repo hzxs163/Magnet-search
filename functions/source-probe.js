@@ -86,6 +86,18 @@ function decodeAtobPayload(html) {
   try { return decodeURIComponent(atob(m[1])); } catch (e) { return ''; }
 }
 
+// 星愿磁力：会员站，匿名请求一律 401，探活必须带上会话 cookie；
+// 没配 cookie 时返回 null（前端显示“未探测”，而不是误报成红点）
+async function probeAvfan(domain, cookie) {
+  if (!cookie) return null;
+  const r = await getRaw(`${domain}/search_magnets?q=${enc('jerry')}&mm=smart&ob=default&sf=none&tf=none&page=1`, {
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Referer': `${domain}/`,
+    'Cookie': cookie,
+  });
+  return r.ok && r.text.includes('urn:btih:');
+}
+
 // 蜜柑计划：搜索页没有小代价的探测方式（整页 1.4MB 起，热门词 4.3MB），
 // 且站点是 CN 主机、CF 出口偶发慢，探活只取首页（180KB）看搜索表单还在不在。
 async function probeMikan(domain) {
@@ -119,7 +131,7 @@ function cilibaoHeaders(cookie) {
 }
 
 // 每个源一个探测函数：true=可达 / false=不可达 / null=没有可用域名（不判红）
-function buildProbes(cfg) {
+function buildProbes(cfg, opts = {}) {
   return {
     '0magnet': async () => {
       const r = await getRaw(`https://0magnet.com/search?q=${enc(PROBE_Q)}&sort=relevance&page=1`);
@@ -270,6 +282,10 @@ function buildProbes(cfg) {
       return r.ok && /-torrent-\d+\.html/.test(r.text) && /itorrents\.net\/torrent\/[a-f0-9]{40}\.torrent/i.test(r.text);
     }),
     mikan: async () => raceDomains(doms(cfg.mikan, 'https://mikanime.tv'), probeMikan),
+    avfan: async () => (opts.avfanCookie
+      ? raceDomains(doms(cfg.avfan, 'https://avfan.com'), (d) => probeAvfan(d, opts.avfanCookie))
+      // 没配会话时不去猜：raceDomains 会把单个 null 吞成 false，所以在这里短路返回 null 判“未探测”
+      : null),
   };
 }
 
@@ -299,7 +315,7 @@ export async function probeSources(cfg, opts = {}) {
   if (!opts.force && probeCache.data && Date.now() - probeCache.ts < PROBE_TTL_MS) {
     return { ...probeCache.data, cached: true };
   }
-  const probes = buildProbes(cfg || {});
+  const probes = buildProbes(cfg || {}, opts);
   const started = Date.now();
   const sources = {};
   await runLimited(Object.entries(probes), sources);

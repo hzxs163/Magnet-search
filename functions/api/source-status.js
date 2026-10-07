@@ -16,7 +16,7 @@ export async function onRequest(context) {
   }
 
   try {
-    const result = await probeSources(cfg, { force });
+    const result = await probeSources(cfg, { force, avfanCookie: (context.env && context.env.AVFAN_COOKIE) || '' });
     return new Response(JSON.stringify({ ok: true, ...result }), {
       headers: {
         'Content-Type': 'application/json; charset=utf-8',
