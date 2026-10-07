@@ -62,6 +62,7 @@ const SOURCE_HOME_FALLBACKS = {
 
 let CCTV10_DEBUG = {};
 let CILIMAO_DEBUG = {};
+let MIKAN_DEBUG = {};
 
 export async function onRequest(context) {
   const { request, waitUntil } = context;
@@ -80,6 +81,7 @@ export async function onRequest(context) {
 
   CCTV10_DEBUG = {};
   CILIMAO_DEBUG = {};
+  MIKAN_DEBUG = {};
 
   const startTime = Date.now();
 
@@ -233,6 +235,7 @@ export async function onRequest(context) {
         totalBeforeDedup: allItems.length,
         cctv10Raw: CCTV10_DEBUG,
         cilimaoRaw: CILIMAO_DEBUG,
+        mikanRaw: MIKAN_DEBUG,
         ...debug,
       },
     });
@@ -2091,6 +2094,7 @@ async function fetchMikanPage(url, waitUntil) {
   const hit = await caches.default.match(cacheKey);
   if (hit) return await hit.text();
 
+  const t0 = Date.now();
   const resp = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -2118,6 +2122,9 @@ async function fetchMikanPage(url, waitUntil) {
   let text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
   const lastRow = text.lastIndexOf('</tr>');
   if (lastRow > 0) text = text.slice(0, lastRow + 5);
+  MIKAN_DEBUG.fetchMs = Date.now() - t0;
+  MIKAN_DEBUG.rawBytes = got;
+  MIKAN_DEBUG.keptChars = text.length;
 
   if (waitUntil) {
     waitUntil(caches.default.put(cacheKey, new Response(text, {
@@ -2197,19 +2204,28 @@ async function fetchFromMikan(query, page, sort, waitUntil) {
   const cfg = getDomainsConfig().mikan;
   const domains = (cfg && cfg.length) ? cfg : [MIKAN_SITE];
   const pageNum = Math.max(1, page || 1);
+  MIKAN_DEBUG.domains = domains;
+  MIKAN_DEBUG.attempts = [];
   for (const domain of domains) {
+    const rec = { domain, ms: 0 };
+    const t0 = Date.now();
+    MIKAN_DEBUG.attempts.push(rec);
     try {
       const url = `${domain}/Home/Search?searchstr=${encodeURIComponent(query)}`;
       const html = await fetchMikanPage(url, waitUntil);
       const items = parseMikanList(html, domain);
+      rec.rows = items.length;
       if (items.length === 0) continue;
       // 站点固定按时间倒序，只有按大小排时需要本地重排；时间排序与站点顺序一致，不必再动
       if (sort === 'length' || sort === 'size') {
         items.sort((a, b) => mikanSizeBytes(b.size) - mikanSizeBytes(a.size));
       }
       const start = (pageNum - 1) * MIKAN_PAGE_SIZE;
+      rec.ms = Date.now() - t0;
       return items.slice(start, start + MIKAN_PAGE_SIZE);
     } catch (err) {
+      rec.ms = Date.now() - t0;
+      rec.err = `${err && err.name ? err.name : ''} ${err.message}`.trim();
       console.error(`Mikan domain ${domain} failed:`, err.message);
     }
   }
