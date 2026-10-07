@@ -2078,8 +2078,57 @@ const MIKAN_PAGE_SIZE = 50;
 // 整页最多解析 MIKAN_MAX_ROWS 行：热门词整页 1000 行 / 4.3MB，全量解析会把整轮聚合拖慢，
 // 而前端一页只展示 50 条，取前 200 行足够翻页用。
 const MIKAN_MAX_ROWS = 200;
-// 站点是 CN 主机，CF 出口取整页偶发超过 10s，超时即换下一个域名/放弃本源，不拖后腿
+// 每行约 2.6KB，200 行 + 页头约需 600KB，留点余量截到 700KB。
+const MIKAN_MAX_BYTES = 700 * 1024;
+// 站点是 CN 主机，CF 出口取整页偶发慢；超时即换下一个域名/放弃本源，不拖整轮聚合
 const MIKAN_FETCH_TIMEOUT_MS = 9000;
+
+// 蜜柑计划专用抓取：整页能到 4.3MB，全读进内存再解析在 28 源并发下会撞超时
+// （实测单源 50 条、全源并发 0 条），所以流式读到 MIKAN_MAX_BYTES 就 cancel，
+// 只保留解析所需的前若干行；截断点回退到最后一个完整 </tr> 避免出现半行。
+async function fetchMikanPage(url, waitUntil) {
+  const cacheKey = new Request(url, { method: 'GET' });
+  const hit = await caches.default.match(cacheKey);
+  if (hit) return await hit.text();
+
+  const resp = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9',
+    },
+    signal: AbortSignal.timeout(MIKAN_FETCH_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
+
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let got = 0;
+  while (got < MIKAN_MAX_BYTES) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    got += value.length;
+  }
+  if (got >= MIKAN_MAX_BYTES) await reader.cancel().catch(() => {});
+
+  const bytes = new Uint8Array(got);
+  let offset = 0;
+  for (const c of chunks) { bytes.set(c, offset); offset += c.length; }
+  let text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  const lastRow = text.lastIndexOf('</tr>');
+  if (lastRow > 0) text = text.slice(0, lastRow + 5);
+
+  if (waitUntil) {
+    waitUntil(caches.default.put(cacheKey, new Response(text, {
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'public, max-age=1800',
+      },
+    })));
+  }
+  return text;
+}
 
 function decodeMikanEntities(s) {
   return String(s || '')
@@ -2151,10 +2200,7 @@ async function fetchFromMikan(query, page, sort, waitUntil) {
   for (const domain of domains) {
     try {
       const url = `${domain}/Home/Search?searchstr=${encodeURIComponent(query)}`;
-      const html = await Promise.race([
-        fetchWithCache(url, 1800, waitUntil),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('mikan fetch timeout')), MIKAN_FETCH_TIMEOUT_MS)),
-      ]);
+      const html = await fetchMikanPage(url, waitUntil);
       const items = parseMikanList(html, domain);
       if (items.length === 0) continue;
       // 站点固定按时间倒序，只有按大小排时需要本地重排；时间排序与站点顺序一致，不必再动
