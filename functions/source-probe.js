@@ -105,6 +105,13 @@ async function probeMikan(domain) {
   return r.ok && r.text.includes('Mikan Project') && r.text.includes('/Home/Search');
 }
 
+// 移花宫：入口是泛解析子域，首页就能证明这个域还挂着搜索站（约 98KB）。
+// 故意不打搜索页：站方对普通 UA 只禁 /api/，HTML 搜索页虽允许，但探活没必要每次真占一次搜索。
+async function probeYihuagong(domain) {
+  const r = await getRaw(`${domain}/`);
+  return r.ok && r.text.includes('移花宫') && r.text.includes('zsky-');
+}
+
 // 磁力宝：首访任意路径都会拿到“点击验证”页，需 POST act=challenge 解锁会话
 async function probeCilibao(domain) {
   const url = `${domain}/s/${b64Utf8Enc(PROBE_Q)}?sort=rel&page=1`;
@@ -286,6 +293,7 @@ function buildProbes(cfg, opts = {}) {
       ? raceDomains(doms(cfg.avfan, 'https://avfan.com'), (d) => probeAvfan(d, opts.avfanCookie))
       // 没配会话时不去猜：raceDomains 会把单个 null 吞成 false，所以在这里短路返回 null 判“未探测”
       : null),
+    yihuagong: async () => raceDomains(doms(cfg.yihuagong, 'https://v1wy494x.1111075.xyz'), probeYihuagong),
   };
 }
 

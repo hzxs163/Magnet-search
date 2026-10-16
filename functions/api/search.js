@@ -28,6 +28,11 @@ const MIKAN_SITE = 'https://mikanime.tv';
 // 星愿磁力（avfan）站点域以 domains.json 的 avfan 为准（check_domains.py 从 t.me/avfanzh 频道页发现），这里只作保底
 const AVFAN_SITE = 'https://avfan.com';
 
+// 移花宫站点域以 domains.json 的 yihuagong 为准（check_domains.py 探活后写入）。
+// 它用泛解析发入口（*.1111075.xyz 任意子域都通），所以池子里某个子域“过期”也不影响可用，
+// 保底写的是抓取当天实测可用的一个子域。
+const YIHUAGONG_SITE = 'https://v1wy494x.1111075.xyz';
+
 // 海盗湾 HTML 版站点域以 domains.json 的 piratebay 为准（check_domains.py 从 piratebayproxy.info 发现），这里只作保底
 const PIRATEBAY_SITE = 'https://thepiratebay.bond';
 
@@ -62,12 +67,14 @@ const SOURCE_HOME_FALLBACKS = {
   limetorrents: LIMETORRENTS_SITE,
   mikan: MIKAN_SITE,
   avfan: AVFAN_SITE,
+  yihuagong: YIHUAGONG_SITE,
 };
 
 let CCTV10_DEBUG = {};
 let CILIMAO_DEBUG = {};
 let MIKAN_DEBUG = {};
 let AVFAN_DEBUG = {};
+let YIHUAGONG_DEBUG = {};
 // 会员会话：来自 Pages 环境变量 AVFAN_COOKIE（绝不写进仓库）；没有它这个源直接跳过
 let AVFAN_COOKIE = '';
 
@@ -79,7 +86,7 @@ export async function onRequest(context) {
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
 
-  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood,btsow,cilibao,limetorrents,mikan,avfan';
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood,btsow,cilibao,limetorrents,mikan,avfan,yihuagong';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
   const wantSourceView = url.searchParams.get('perSource') === '1';
 
@@ -91,6 +98,7 @@ export async function onRequest(context) {
   CILIMAO_DEBUG = {};
   MIKAN_DEBUG = {};
   AVFAN_DEBUG = {};
+  YIHUAGONG_DEBUG = {};
 
   const startTime = Date.now();
 
@@ -184,6 +192,9 @@ export async function onRequest(context) {
     if (sources.includes('avfan')) {
       tasks.push({ name: 'avfan', promise: fetchFromAvfan(query, page, sort, waitUntil) });
     }
+    if (sources.includes('yihuagong')) {
+      tasks.push({ name: 'yihuagong', promise: fetchFromYihuagong(query, page, sort, waitUntil) });
+    }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
 
@@ -249,6 +260,7 @@ export async function onRequest(context) {
         cilimaoRaw: CILIMAO_DEBUG,
         mikanRaw: MIKAN_DEBUG,
         avfanRaw: AVFAN_DEBUG,
+        yihuagongRaw: YIHUAGONG_DEBUG,
         ...debug,
       },
     });
@@ -315,6 +327,7 @@ function getDomainsConfig() {
     limetorrents: Array.isArray(data.limetorrents) ? data.limetorrents : [],
     mikan: Array.isArray(data.mikan) ? data.mikan : [],
     avfan: Array.isArray(data.avfan) ? data.avfan : [],
+    yihuagong: Array.isArray(data.yihuagong) ? data.yihuagong : [],
   };
 }
 
@@ -2354,6 +2367,120 @@ async function fetchFromAvfan(query, page, sort, waitUntil) {
       rec.ms = Date.now() - t0;
       rec.err = `${err && err.name ? err.name : ''} ${err.message}`.trim();
       console.error(`Avfan domain ${domain} failed:`, err.message);
+    }
+  }
+  return [];
+}
+
+// ========== 移花宫（yihuagong） ==========
+// 中文综合站（影视/音乐/文档/安装包等），搜索是服务端渲染的 HTML：
+//   GET /search-{关键词}-0-{排序位}-{页码}.html
+// 排序位实测：0=相关程度 1=文件大小 2=最新添加 3=热度 4=最近发现。
+// 磁力不用二跳：结果行的详情链就是 /hash/{40位hex}.html，infohash 直接在里面。
+// 入口域名是泛解析（*.1111075.xyz 任意子域都通），所以池子里的子域不会因为“换入口”而失效；
+// 根域整体被换掉时，check_domains.py 会从发布页取到新根域，这里再兜底造一个随机子域试一次。
+// robots.txt 对普通 UA 是 Allow: /，只禁 /api/ 与 /payment/，所以只走 HTML 页、不碰它的 JSON 接口。
+
+function yihuagongSortTok(sort) {
+  if (sort === 'length' || sort === 'size') return '1';
+  if (sort === 'time' || sort === 'newest') return '2';
+  if (sort === 'seeds' || sort === 'hits' || sort === 'requests') return '3';
+  if (sort === 'views') return '4';
+  return '0';
+}
+
+// 从可用入口 URL 里取泛解析根域（*.1111075.xyz 的最后两段）
+function yihuagongRoot(domain) {
+  try {
+    const parts = new URL(domain).hostname.split('.');
+    if (parts.length >= 2) return parts.slice(-2).join('.');
+  } catch (e) { /* 池子里是脏数据，交给上层换下一个 */ }
+  return '';
+}
+
+function yihuagongWildDomain(root) {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let label = '';
+  for (let i = 0; i < 8; i++) label += chars[Math.floor(Math.random() * chars.length)];
+  return `https://${label}.${root}`;
+}
+
+function decodeYihuagongEntities(s) {
+  return String(s || '')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d+);/g, (m, d) => String.fromCharCode(Number(d)));
+}
+
+function parseYihuagongList(html, domain) {
+  const items = [];
+  for (const chunk of String(html || '').split('</article>')) {
+    const at = chunk.lastIndexOf('<article');
+    if (at < 0) continue;
+    const row = chunk.slice(at);
+    // 磁力与详情同源：链就是 /hash/{40位hex}.html，取不到 hash 就不算一条结果
+    const hashM = row.match(/href="\/hash\/([0-9a-fA-F]{40})\.html"/);
+    const titleM = row.match(/class="zsky-result-name zsky-result-link"[^>]*>([\s\S]*?)<\/a>/);
+    if (!hashM || !titleM) continue;
+    // 标题里的【影视】是分类标签，留在 name 里会污染去重和关键词高亮，剥掉
+    const name = decodeYihuagongEntities(titleM[1].replace(/<[^>]+>/g, ' '))
+      .replace(/^\s*【[^】]{1,8}】\s*/, '')
+      .replace(/\s+/g, ' ').trim();
+    if (!name) continue;
+    let size = '', date = '';
+    for (const sp of row.match(/<span>([^<]{2,60})<\/span>/g) || []) {
+      const t = decodeYihuagongEntities(sp.replace(/<\/?span[^>]*>/g, '')).trim();
+      const sz = t.match(/^大小[：:]\s*([\d.]+\s*[KMGTP]?B)/i);
+      const dt = t.match(/^(?:添加时间|收录时间)[：:]\s*(\d{4}-\d{2}-\d{2})/);
+      if (sz && !size) size = sz[1];
+      else if (dt && !date) date = dt[1];
+    }
+    items.push({
+      name,
+      size,
+      date,
+      magnet: `magnet:?xt=urn:btih:${hashM[1].toLowerCase()}`,
+      detailUrl: `${domain}/hash/${hashM[1].toLowerCase()}.html`,
+      source: 'yihuagong',
+    });
+  }
+  return items;
+}
+
+async function fetchFromYihuagong(query, page, sort, waitUntil) {
+  const cfg = getDomainsConfig().yihuagong;
+  const pool = (cfg && cfg.length) ? cfg : [YIHUAGONG_SITE];
+  const pageNum = Math.max(1, page || 1);
+  const sortTok = yihuagongSortTok(sort);
+  YIHUAGONG_DEBUG.domains = pool;
+  YIHUAGONG_DEBUG.attempts = [];
+
+  const candidates = pool.slice(0, 3);
+  for (const d of pool) {
+    const root = yihuagongRoot(d);
+    // 泛解析根还在、只是池子里的子域全撞了：造一个新子域兜底一次
+    if (root && candidates.length < pool.length + 1) {
+      candidates.push(yihuagongWildDomain(root));
+      break;
+    }
+  }
+
+  for (const domain of candidates) {
+    const rec = { domain, ms: 0 };
+    const t0 = Date.now();
+    YIHUAGONG_DEBUG.attempts.push(rec);
+    try {
+      const url = `${domain}/search-${encodeURIComponent(query)}-0-${sortTok}-${pageNum}.html`;
+      YIHUAGONG_DEBUG.lastUrl = url;
+      const html = await fetchWithCache(url, 900, waitUntil, { 'Referer': `${domain}/` });
+      const items = parseYihuagongList(html, domain);
+      rec.bytes = html.length;
+      rec.items = items.length;
+      if (items.length > 0) return items;
+    } catch (err) {
+      rec.ms = Date.now() - t0;
+      rec.err = `${err && err.name ? err.name : ''} ${err.message}`.trim();
+      console.error(`Yihuagong domain ${domain} failed:`, err.message);
     }
   }
   return [];

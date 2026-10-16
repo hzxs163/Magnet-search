@@ -15,6 +15,9 @@
 11. 蜜柑计划（mikan）：knaben.info 不收录这个站，域名靠内置候选实探测
 12. 星愿磁力（avfan）：会员站，域名从 Telegram 频道页 t.me/s/avfanzh 提取；
     磁力接口必须带登录会话（环境变量 AVFAN_COOKIE），没配就跳过探测、保留上次域名
+13. 移花宫（yihuagong）：入口是泛解析子域（*.1111075.xyz 任意子域都通，站方每半小时在发布页
+    刷新一轮子域），所以这里探的是「根域还活着没有」：给每个候选根域现造一个随机子域实探测
+    搜索页，能出 /hash/{40位hex} 结果链才算可用。候选根域=内置 + 发布页明文里读到的
 把生成的域名写入 domains.json，验证交给 Workers 运行时做
 
 依赖：curl_cffi（用于模拟 Chrome TLS 指纹，绕过 WAF 403）
@@ -25,6 +28,7 @@ import base64
 import json
 import os
 import re
+import random
 import time
 import urllib.request
 import urllib.error
@@ -978,6 +982,7 @@ def main():
         'limetorrents': [],
         'mikan': [],
         'avfan': [],
+        'yihuagong': [],
     }
 
     result['xiaocao'] = extract_xiaocao_domains()
@@ -1315,6 +1320,61 @@ def main():
                 print(f'[蜜柑计划] {d} 探测失败: {e}')
         return domains
 
+    def extract_yihuagong_domains():
+        # 移花宫的入口是泛解析子域：站方每半小时在发布页换一批新子域，但 *.根域 下任意子域都通，
+        # 所以“子域过期”不是问题，要探的是根域还在不在。做法：候选根域（内置 + 发布页里读到的）
+        # 各自现造一个随机子域打一次搜索页，拿到 /hash/{40位hex} 结果链才算这个根域可用。
+        roots = ['1111075.xyz']
+        # 发布页里的地址有两种写法：https:// 前缀的、和 yhg007.com 这种裸文本；
+        # 裸域还会直接返回 410 + 新入口，所以一律用 fetch_probe（非 2xx 不抛异常，还能留状态码）
+        for page in ['https://1111075.xyz/', 'https://www.yhgyhg.cyou/', 'https://yhgbt.top/']:
+            try:
+                html, code, _ = fetch_probe(page, timeout=20, headers={'Referer': page})
+            except Exception as e:
+                print(f'[移花宫] 发布页 {page} 读取失败: {e}')
+                continue
+            found = []
+            for m in re.finditer(r'(?:https?://)?(?:[a-z0-9\-]+\.)*([a-z0-9][a-z0-9\-]*\.(?:com|net|org|xyz|cyou|top|icu|sbs|bond|cc|vip|me|info))', html, re.I):
+                host = m.group(1).lower()
+                if host in roots or 'cloudflare' in host or 'w3.org' in host:
+                    continue
+                # 邮箱的域名段（support@xxx.com）不是入口
+                if html[max(0, m.start() - 1):m.start()] == '@':
+                    continue
+                found.append(host)
+            for host in found:
+                if host not in roots:
+                    roots.append(host)
+            print(f'[移花宫] 发布页 {page} HTTP {code}，收到候选根域 {found}')
+
+        # 发布页正文里混着 a.style.top 这类 JS/CSS 碎片，会被当成域名收进来；
+        # 靠探测本身过滤（404/连不上就丢），但拿够 3 个就不必再浪费请求
+        domains = []
+        tried = set()
+        for root in roots:
+            if len(domains) >= 3 or len(tried) >= 6 or root in tried:
+                continue
+            tried.add(root)
+            label = ''.join(random.choice(ALPHABET) for _ in range(8))
+            d = f'https://{label}.{root}'
+            url = f'{d}/search-ubuntu-0-0-1.html'
+            text, code = None, None
+            for attempt in (1, 2):
+                # 新建子域偶尔首包很慢（实测 8 个里会撞 1 次读超时），所以留一次重试
+                try:
+                    text, code, _ = fetch_probe(url, timeout=25, headers={'Referer': d + '/'})
+                    break
+                except Exception as e:
+                    print(f'[移花宫] 根域 {root} 第 {attempt} 次探测失败: {e}')
+            if not text:
+                continue
+            if 'zsky-result-row' in text and re.search(r'href="/hash/[0-9a-fA-F]{40}\.html"', text):
+                print(f'[移花宫] {d} 可用（根域 {root}）')
+                domains.append(d)
+            else:
+                print(f'[移花宫] 根域 {root} HTTP {code}，无搜索结果页特征，跳过')
+        return domains
+
     for name, fn in [('btfox', extract_btfox_domains),
                      ('zhongziba', extract_zhongziba_domains),
                      ('cilichi', extract_cilichi_domains),
@@ -1328,7 +1388,8 @@ def main():
                      ('cilibao', extract_cilibao_domains),
                      ('limetorrents', extract_limetorrents_domains),
                      ('mikan', extract_mikan_domains),
-                     ('avfan', extract_avfan_domains)]:
+                     ('avfan', extract_avfan_domains),
+                     ('yihuagong', extract_yihuagong_domains)]:
         found = fn()
         if found:
             result[name] = found
@@ -1368,6 +1429,7 @@ def main():
     print(f'  LimeTorrents: {len(result["limetorrents"])} 个')
     print(f'  蜜柑计划: {len(result["mikan"])} 个')
     print(f'  星愿磁力: {len(result["avfan"])} 个')
+    print(f'  移花宫: {len(result["yihuagong"])} 个')
     if result['cctv10']:
         print('  U3C3 域名:')
         for d in result['cctv10']:
@@ -1452,6 +1514,11 @@ def main():
     if result['avfan']:
         print('  星愿磁力域名:')
         for d in result['avfan']:
+            print(f'    - {d}')
+
+    if result['yihuagong']:
+        print('  移花宫域名:')
+        for d in result['yihuagong']:
             print(f'    - {d}')
 
 
