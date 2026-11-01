@@ -18,6 +18,8 @@
 13. 移花宫（yihuagong）：入口是泛解析子域（*.1111075.xyz 任意子域都通，站方每半小时在发布页
     刷新一轮子域），所以这里探的是「根域还活着没有」：给每个候选根域现造一个随机子域实探测
     搜索页，能出 /hash/{40位hex} 结果链才算可用。候选根域=内置 + 发布页明文里读到的
+14. U9A9（u9a）：地址发布页 u9dz.cc 的 main.js 是混淆脚本，用 node + 受限 vm 跑一遍取出它
+    动态写入的当前域名，再逐个打搜索页实探测；node 不在时退回内置候选 u9a9.my / u9a9.mom
 把生成的域名写入 domains.json，验证交给 Workers 运行时做
 
 依赖：curl_cffi（用于模拟 Chrome TLS 指纹，绕过 WAF 403）
@@ -29,6 +31,9 @@ import json
 import os
 import re
 import random
+import shutil
+import subprocess
+import tempfile
 import time
 import urllib.request
 import urllib.error
@@ -938,6 +943,143 @@ def extract_cilibao_domains():
     return ok
 
 
+# ========== U9A9（地址发布页 u9dz.cc，混淆 JS 用 node 沙箱解出当前域名） ==========
+U9A_ENTRY_URL = 'https://u9dz.cc/'
+U9A_SCRIPT_URL = 'https://u9dz.cc/main.js?1'
+U9A_FALLBACK_SITES = ['https://u9a9.my', 'https://u9a9.mom']
+U9A_NODE_HARNESS = r'''
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[1], 'utf8');
+const context = vm.createContext(Object.create(null), { codeGeneration: { strings: false, wasm: false } });
+const bootstrap = String.raw`
+const B64 = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=';
+globalThis.__elements = {};
+globalThis.document = {
+  getElementById(id) { return globalThis.__elements[id] || (globalThis.__elements[id] = { innerHTML: '', id }); },
+  addEventListener(ev, cb) { if (ev === 'DOMContentLoaded') cb(); },
+  write() {},
+  createElement() { return { style: {}, setAttribute() {}, appendChild() {} }; },
+  querySelector() { return null; },
+  body: { appendChild() {}, style: {} },
+  documentElement: { style: {} },
+  cookie: '',
+};
+globalThis.navigator = { userAgent: 'Mozilla/5.0' };
+globalThis.location = { href: 'https://u9dz.cc/', search: '', hostname: 'u9dz.cc', protocol: 'https:' };
+globalThis.console = { log() {}, warn() {}, error() {} };
+globalThis.setTimeout = (fn) => { try { fn(); } catch (e) {} return 0; };
+globalThis.setInterval = () => 0;
+globalThis.clearTimeout = () => {};
+globalThis.clearInterval = () => {};
+globalThis.atob = function (input) {
+  const str = String(input).replace(/=+$/, '');
+  let out = '';
+  for (let bc = 0, bs, buffer, idx = 0; (buffer = str.charAt(idx++)); ~buffer && (bs = bc % 4 ? bs * 64 + buffer : buffer, bc++ % 4) ? out += String.fromCharCode(255 & bs >> (-2 * bc & 6)) : 0) {
+    buffer = B64.indexOf(buffer);
+  }
+  return out;
+};
+globalThis.btoa = function (input) {
+  const str = String(input);
+  let out = '';
+  for (let block, charCode, idx = 0, map = B64; str.charAt(idx | 0) || (map = '=', idx % 1); out += map.charAt(63 & block >> 8 - idx % 1 * 8)) {
+    charCode = str.charCodeAt(idx += 3 / 4);
+    if (charCode > 0xFF) throw new Error('btoa: latin1 only');
+    block = block << 8 | charCode;
+  }
+  return out;
+};
+globalThis.window = globalThis;
+globalThis.self = globalThis;
+`;
+vm.runInContext(bootstrap, context, { timeout: 1000 });
+try { vm.runInContext(src, context, { timeout: 3000 }); } catch (e) {}
+const out = vm.runInContext('JSON.stringify({ html: (globalThis.__elements.link2 && globalThis.__elements.link2.innerHTML) || "" })', context, { timeout: 1000 });
+const html = JSON.parse(out).html;
+const domains = [];
+for (const m of html.matchAll(/href="(https?:\/\/[^"/]+)/gi)) {
+  const d = m[1].replace(/\/+$/, '');
+  if (!domains.includes(d)) domains.push(d);
+}
+process.stdout.write(JSON.stringify({ domains }) + '\n');
+'''
+
+
+def _decode_u9a_js(js):
+    node = shutil.which('node')
+    if not node:
+        print('[u9a] 未找到 node，无法执行发布页混淆脚本')
+        return []
+    path = None
+    try:
+        fd, path = tempfile.mkstemp(suffix='.js')
+        os.close(fd)
+        Path(path).write_text(js, encoding='utf-8')
+        proc = subprocess.run(
+            [node, '-e', U9A_NODE_HARNESS, path],
+            capture_output=True, text=True, timeout=25, encoding='utf-8', errors='replace',
+        )
+        if proc.returncode != 0:
+            print(f'[u9a] node 解码失败: {(proc.stderr or "").strip()[:200]}')
+            return []
+        line = (proc.stdout or '').strip().splitlines()[-1]
+        data = json.loads(line)
+        return data.get('domains', [])
+    except Exception as e:
+        print(f'[u9a] node 解码异常: {e}')
+        return []
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def extract_u9a_domains():
+    candidates = []
+    try:
+        js = fetch_text(U9A_SCRIPT_URL, timeout=20, headers={'Referer': U9A_ENTRY_URL})
+        candidates = _decode_u9a_js(js)
+        if candidates:
+            print(f'[u9a] 发布页当前域名: {", ".join(candidates)}')
+        else:
+            print('[u9a] 发布页脚本未解出域名')
+    except Exception as e:
+        print(f'[u9a] 发布页读取失败: {e}')
+
+    if not candidates:
+        candidates = list(U9A_FALLBACK_SITES)
+        print('[u9a] 改用内置候选: ' + ', '.join(candidates))
+
+    normalized = []
+    for d in candidates:
+        d = d.rstrip('/')
+        if is_valid_domain_url(d) and d not in normalized:
+            normalized.append(d)
+    if not normalized:
+        return []
+
+    ok = []
+    for d in normalized:
+        try:
+            html = fetch_text(f'{d}/?type=2&search=jerry', timeout=15)
+            if '<tr class="default">' in html and 'magnet:?xt=urn:btih:' in html:
+                print(f'[u9a] {d} 可用')
+                ok.append(d)
+            else:
+                print(f'[u9a] {d} 无搜索结果特征，跳过')
+        except Exception as e:
+            print(f'[u9a] {d} 探测失败: {e}')
+
+    if not ok:
+        print('[u9a] 发布页域名均未探测通过，保留上次域名')
+        return []
+    # 发布页是权威来源：只要有一个域能通，就保留整份最新名单（个别域临时 522 不代表站方换域）
+    return ok + [d for d in normalized if d not in ok]
+
+
 def load_previous_domains():
     if not OUTPUT_FILE.exists():
         return {}
@@ -983,6 +1125,7 @@ def main():
         'mikan': [],
         'avfan': [],
         'yihuagong': [],
+        'u9a': [],
     }
 
     result['xiaocao'] = extract_xiaocao_domains()
@@ -1389,7 +1532,8 @@ def main():
                      ('limetorrents', extract_limetorrents_domains),
                      ('mikan', extract_mikan_domains),
                      ('avfan', extract_avfan_domains),
-                     ('yihuagong', extract_yihuagong_domains)]:
+                     ('yihuagong', extract_yihuagong_domains),
+                     ('u9a', extract_u9a_domains)]:
         found = fn()
         if found:
             result[name] = found
@@ -1430,6 +1574,7 @@ def main():
     print(f'  蜜柑计划: {len(result["mikan"])} 个')
     print(f'  星愿磁力: {len(result["avfan"])} 个')
     print(f'  移花宫: {len(result["yihuagong"])} 个')
+    print(f'  u9a: {len(result["u9a"])} 个')
     if result['cctv10']:
         print('  U3C3 域名:')
         for d in result['cctv10']:
@@ -1519,6 +1664,11 @@ def main():
     if result['yihuagong']:
         print('  移花宫域名:')
         for d in result['yihuagong']:
+            print(f'    - {d}')
+
+    if result['u9a']:
+        print('  u9a域名:')
+        for d in result['u9a']:
             print(f'    - {d}')
 
 

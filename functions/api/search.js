@@ -36,6 +36,9 @@ const YIHUAGONG_SITE = 'https://v1wy494x.1111075.xyz';
 // 海盗湾 HTML 版站点域以 domains.json 的 piratebay 为准（check_domains.py 从 piratebayproxy.info 发现），这里只作保底
 const PIRATEBAY_SITE = 'https://thepiratebay.bond';
 
+// U9A9 站点域以 domains.json 的 u9a 为准（check_domains.py 从地址发布页 u9dz.cc 发现），这里只作保底
+const U9A_SITE = 'https://u9a9.mom';
+
 // 每个源的主页保底域名：只在 domains.json 该源域名池为空时用于右键跳转，避免个别源标签点了没反应
 const SOURCE_HOME_FALLBACKS = {
   '0magnet': 'https://0magnet.com',
@@ -68,6 +71,7 @@ const SOURCE_HOME_FALLBACKS = {
   mikan: MIKAN_SITE,
   avfan: AVFAN_SITE,
   yihuagong: YIHUAGONG_SITE,
+  u9a: U9A_SITE,
 };
 
 let CCTV10_DEBUG = {};
@@ -86,7 +90,7 @@ export async function onRequest(context) {
   const page = parseInt(url.searchParams.get('page') || '1', 10);
   const sort = url.searchParams.get('sort') || 'relevance';
 
-  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood,btsow,cilibao,limetorrents,mikan,avfan,yihuagong';
+  const sourcesParam = url.searchParams.get('sources') || '0magnet,xiaocao,juniorter,cilibaike,knaben,yuhuage,hufeng,cctv10,cilimao,ciliso,taocili,tpb,tpbweb,piratebay,therarbg,eztv,btfox,zhongziba,cilichi,yts,miaocili,xcisou,torrentgalaxy,filemood,btsow,cilibao,limetorrents,mikan,avfan,yihuagong,u9a';
   const sources = sourcesParam.split(',').map(s => s.trim()).filter(Boolean);
   const wantSourceView = url.searchParams.get('perSource') === '1';
 
@@ -194,6 +198,9 @@ export async function onRequest(context) {
     }
     if (sources.includes('yihuagong')) {
       tasks.push({ name: 'yihuagong', promise: fetchFromYihuagong(query, page, sort, waitUntil) });
+    }
+    if (sources.includes('u9a')) {
+      tasks.push({ name: 'u9a', promise: fetchFromU9a(query, page, sort, waitUntil) });
     }
 
     const results = await Promise.allSettled(tasks.map(t => t.promise));
@@ -328,6 +335,7 @@ function getDomainsConfig() {
     mikan: Array.isArray(data.mikan) ? data.mikan : [],
     avfan: Array.isArray(data.avfan) ? data.avfan : [],
     yihuagong: Array.isArray(data.yihuagong) ? data.yihuagong : [],
+    u9a: Array.isArray(data.u9a) ? data.u9a : [],
   };
 }
 
@@ -2484,4 +2492,49 @@ async function fetchFromYihuagong(query, page, sort, waitUntil) {
     }
   }
   return [];
+}
+
+// ========== U9A9（HTML 列表，磁力链接直接写在结果行里） ==========
+async function fetchFromU9a(query, page, sort, waitUntil) {
+  const cfg = getDomainsConfig().u9a;
+  const domains = (cfg && cfg.length) ? cfg : [U9A_SITE];
+  const pageNum = Math.max(1, page || 1);
+  const searchPath = `/?type=2&search=${encodeURIComponent(query)}${pageNum > 1 ? `&p=${pageNum}` : ''}`;
+  for (const domain of domains) {
+    try {
+      const items = parseU9aResults(await fetchWithCache(`${domain}${searchPath}`, 900, waitUntil), domain);
+      if (items.length > 0) return items;
+    } catch (err) {
+      console.error(`U9A domain ${domain} failed:`, err.message);
+    }
+  }
+  return [];
+}
+
+function parseU9aResults(html, domain) {
+  const items = [];
+  for (const block of String(html || '').split('<tr class="default">').slice(1)) {
+    const row = block.split('</tr>')[0];
+    const magnetM = row.match(/href="(magnet:\?xt=urn:btih:[^"]+)"/i);
+    if (!magnetM) continue;
+    const linkM = row.match(/<a href="\/view\/\d+\/([a-fA-F0-9]{40})"[^>]*title="([^"]*)"/i);
+    const titleM = linkM ? null : row.match(/<a href="\/view\/[^"]+"[^>]*>([\s\S]*?)<\/a>/i);
+    const nameHtml = linkM ? linkM[2] : (titleM ? titleM[1].replace(/<span[^>]*>[\s\S]*?<\/span>/gi, '') : '');
+    const name = decodeYihuagongEntities(nameHtml.replace(/<[^>]+>/g, ' '))
+      .replace(/\s+/g, ' ').trim();
+    if (!name) continue;
+    const hash = linkM ? linkM[1] : (magnetM[1].match(/btih:([a-fA-F0-9]{40})/) || [])[1];
+    if (!hash) continue;
+    const sizeM = row.match(/<td class="text-center">\s*([\d.]+\s*(?:B|KB|MB|GB|TB))\s*<\/td>/i);
+    const dateM = row.match(/<td class="text-center">\s*(\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2}:\d{2})?)\s*<\/td>/);
+    items.push({
+      name,
+      size: sizeM ? sizeM[1].replace(/\s+/g, ' ') : '',
+      date: dateM ? dateM[1] : '',
+      magnet: `magnet:?xt=urn:btih:${hash.toLowerCase()}`,
+      detailUrl: `${domain}/view/2/${hash.toLowerCase()}`,
+      source: 'u9a',
+    });
+  }
+  return items;
 }

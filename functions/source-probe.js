@@ -294,6 +294,10 @@ function buildProbes(cfg, opts = {}) {
       // 没配会话时不去猜：raceDomains 会把单个 null 吞成 false，所以在这里短路返回 null 判“未探测”
       : null),
     yihuagong: async () => raceDomains(doms(cfg.yihuagong, 'https://v1wy494x.1111075.xyz'), probeYihuagong),
+    u9a: async () => raceDomains(doms(cfg.u9a, 'https://u9a9.mom'), async (d) => {
+      const r = await getRaw(`${d}/?type=2&search=jerry`);
+      return r.ok && /<tr class="default">[\s\S]*?magnet:\?xt=urn:btih:/i.test(r.text);
+    }),
   };
 }
 
